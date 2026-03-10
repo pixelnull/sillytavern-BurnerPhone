@@ -1,81 +1,79 @@
-<div class="bp-drawer inline-drawer">
-    <div class="inline-drawer-toggle inline-drawer-header">
+<div class="bp-panel-content">
+    <!-- Title bar with action icons -->
+    <div class="bp-panel-title">
         <b>BurnerPhone</b>
         <span id="bp_active_char_label" class="bp-header-label"></span>
         <div class="bp-header-icons">
             <div id="bpViewPrompt" class="fa-solid fa-eye hoverglow bp-header-icon" title="View last prompt"></div>
             <div id="bpClearChat" class="fa-solid fa-trash-can hoverglow bp-header-icon" title="Clear conversation"></div>
         </div>
-        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
-    <div class="inline-drawer-content">
 
-        <!-- From / To identity row -->
-        <div class="bp-identity-row">
-            <div class="bp-identity-field">
-                <label for="bp_from">From</label>
-                <input id="bp_from" list="bp_from_list" class="text_pole" placeholder="Me">
-                <datalist id="bp_from_list"></datalist>
-            </div>
-            <div class="bp-identity-field">
-                <label for="bp_to">To</label>
-                <input id="bp_to" list="bp_to_list" class="text_pole" placeholder="Character name...">
-                <datalist id="bp_to_list"></datalist>
-            </div>
-            <div id="bp_start_convo" class="menu_button bp-start-btn" title="Start conversation">
-                <i class="fa-solid fa-arrow-right"></i>
-            </div>
+    <!-- From / To identity row -->
+    <div class="bp-identity-row">
+        <div class="bp-identity-field">
+            <label for="bp_from">From</label>
+            <input id="bp_from" list="bp_from_list" class="text_pole" placeholder="Me">
+            <datalist id="bp_from_list"></datalist>
         </div>
-
-        <!-- Conversation list -->
-        <div id="bp_convo_list" class="bp-convo-list" style="display: none;"></div>
-
-        <!-- Active conversation header -->
-        <div id="bp_active_header" class="bp-active-header" style="display: none;">
-            <div class="bp-active-names">
-                <span id="bp_active_from" class="bp-active-name"></span>
-                <i class="fa-solid fa-arrow-right bp-arrow-icon"></i>
-                <span id="bp_active_to" class="bp-active-name"></span>
-            </div>
-            <div class="bp-toggles">
-                <label class="checkbox_label bp-toggle-label" for="bp_toggle_sees_world"
-                       title="PM character can see main chat history and all world lore">
-                    <input id="bp_toggle_sees_world" type="checkbox">
-                    <span>PM sees world</span>
-                </label>
-                <label class="checkbox_label bp-toggle-label" for="bp_toggle_story_sees"
-                       title="Main chat / story generation includes PM conversation (group: only target character)">
-                    <input id="bp_toggle_story_sees" type="checkbox">
-                    <span>Story sees PM</span>
-                </label>
-            </div>
+        <div class="bp-identity-field">
+            <label for="bp_to">To</label>
+            <input id="bp_to" list="bp_to_list" class="text_pole" placeholder="Character name...">
+            <datalist id="bp_to_list"></datalist>
         </div>
-
-        <!-- Chat Messages Area -->
-        <div id="bp_chat_area" class="bp-chat-area">
-            <div id="bp_chat_messages" class="bp-chat-messages">
-                <div class="bp-empty-state">Pick a character to start a conversation.</div>
-            </div>
+        <div id="bp_start_convo" class="menu_button bp-start-btn" title="Start conversation">
+            <i class="fa-solid fa-arrow-right"></i>
         </div>
-
-        <!-- Input Area -->
-        <div id="bp_input_area" class="bp-input-area" style="display: none;">
-            <textarea id="bp_input" class="text_pole bp-input-text" placeholder="Type a message..." rows="2"></textarea>
-            <div id="bp_send" class="menu_button bp-send-btn" title="Send (Enter)">
-                <i class="fa-solid fa-paper-plane"></i>
-            </div>
-        </div>
-
-        <!-- Prompt Viewer -->
-        <div id="bp_prompt_viewer" class="bp-prompt-viewer" style="display: none;">
-            <div class="bp-prompt-viewer-header">
-                <small>Last Prompt Sent</small>
-                <div id="bpClosePrompt" class="fa-solid fa-xmark hoverglow bp-header-icon" title="Close"></div>
-            </div>
-            <pre id="bp_prompt_text" class="bp-prompt-text"></pre>
-        </div>
-
-        <!-- Status -->
-        <div id="bp_status" class="bp-status"></div>
     </div>
+
+    <!-- Conversation list -->
+    <div id="bp_convo_list" class="bp-convo-list" style="display: none;"></div>
+
+    <!-- Active conversation header -->
+    <div id="bp_active_header" class="bp-active-header" style="display: none;">
+        <div class="bp-active-names">
+            <span id="bp_active_from" class="bp-active-name"></span>
+            <i class="fa-solid fa-arrow-right bp-arrow-icon"></i>
+            <span id="bp_active_to" class="bp-active-name"></span>
+        </div>
+        <div class="bp-toggles">
+            <label class="checkbox_label bp-toggle-label" for="bp_toggle_sees_world"
+                   title="PM character can see main chat history and all world lore">
+                <input id="bp_toggle_sees_world" type="checkbox">
+                <span>PM sees world</span>
+            </label>
+            <label class="checkbox_label bp-toggle-label" for="bp_toggle_story_sees"
+                   title="Main chat / story generation includes PM conversation (group: only target character)">
+                <input id="bp_toggle_story_sees" type="checkbox">
+                <span>Story sees PM</span>
+            </label>
+        </div>
+    </div>
+
+    <!-- Chat Messages Area -->
+    <div id="bp_chat_area" class="bp-chat-area">
+        <div id="bp_chat_messages" class="bp-chat-messages">
+            <div class="bp-empty-state">Pick a character to start a conversation.</div>
+        </div>
+    </div>
+
+    <!-- Input Area -->
+    <div id="bp_input_area" class="bp-input-area" style="display: none;">
+        <textarea id="bp_input" class="text_pole bp-input-text" placeholder="Type a message..." rows="2"></textarea>
+        <div id="bp_send" class="menu_button bp-send-btn" title="Send (Enter)">
+            <i class="fa-solid fa-paper-plane"></i>
+        </div>
+    </div>
+
+    <!-- Prompt Viewer -->
+    <div id="bp_prompt_viewer" class="bp-prompt-viewer" style="display: none;">
+        <div class="bp-prompt-viewer-header">
+            <small>Last Prompt Sent</small>
+            <div id="bpClosePrompt" class="fa-solid fa-xmark hoverglow bp-header-icon" title="Close"></div>
+        </div>
+        <pre id="bp_prompt_text" class="bp-prompt-text"></pre>
+    </div>
+
+    <!-- Status -->
+    <div id="bp_status" class="bp-status"></div>
 </div>

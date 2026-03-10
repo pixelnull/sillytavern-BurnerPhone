@@ -8,6 +8,7 @@ import {
     chat,
     name1,
     this_chid,
+    doNavbarIconClick,
 } from '../../../../script.js';
 import {
     extension_settings,
@@ -489,7 +490,7 @@ function updatePromptViewer() {
 
 function applyBubbleColors() {
     const settings = getSettings();
-    const $panel = $('.bp-drawer');
+    const $panel = $('#burnerphone-panel');
     if (settings.userBubbleColor) {
         $panel.css('--bp-from-bubble', settings.userBubbleColor);
     } else {
@@ -583,35 +584,14 @@ function saveDraftDebounced() {
 }
 
 // ==========================================================================
-// Panel toggle (open right drawer + expand inline-drawer)
+// Panel open hook — refresh UI when drawer is opened
 // ==========================================================================
 
-function togglePanel() {
-    const $drawer = $('.bp-drawer');
-    const $content = $drawer.find('.inline-drawer-content');
-    const isExpanded = $content.is(':visible');
-
-    if (!isExpanded) {
-        // Open right nav drawer if closed
-        const $rightPanel = $('#right-nav-panel');
-        if ($rightPanel.hasClass('closedDrawer')) {
-            $('#rightNavDrawerIcon').trigger('click');
-        }
-        // Expand the inline-drawer
-        $drawer.find('.inline-drawer-toggle').trigger('click');
-        // Scroll to it
-        setTimeout(() => {
-            $drawer[0]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }, 100);
-        // Refresh UI
-        populateDatalists();
-        renderConversationList();
-        const activeKey = getActiveKey();
-        if (activeKey) switchToConversation(activeKey);
-    } else {
-        saveDraftImmediate();
-        $drawer.find('.inline-drawer-toggle').trigger('click');
-    }
+function onDrawerOpened() {
+    populateDatalists();
+    renderConversationList();
+    const activeKey = getActiveKey();
+    if (activeKey) switchToConversation(activeKey);
 }
 
 // ==========================================================================
@@ -787,8 +767,7 @@ function bindChatPanelEvents() {
     });
 
     // Clear conversation
-    $('#bpClearChat').off('click').on('click', function (e) {
-        e.stopPropagation(); // Don't toggle the inline-drawer
+    $('#bpClearChat').off('click').on('click', function () {
         const convo = getActiveConversation();
         if (!convo) return;
         if (!confirm(`Clear all messages in this conversation?`)) return;
@@ -799,8 +778,7 @@ function bindChatPanelEvents() {
     });
 
     // Prompt viewer toggle
-    $('#bpViewPrompt').off('click').on('click', function (e) {
-        e.stopPropagation();
+    $('#bpViewPrompt').off('click').on('click', function () {
         const $viewer = $('#bp_prompt_viewer');
         if ($viewer.is(':visible')) {
             $viewer.hide();
@@ -834,23 +812,36 @@ function bindChatPanelEvents() {
 }
 
 // ==========================================================================
-// Top bar icon
+// Drawer panel creation
 // ==========================================================================
 
-function addTopBarIcon() {
-    if ($('#bp-toggle-button').length) return;
+function createDrawerPanel(chatPanelHtml) {
+    if ($('#burnerphone-drawer').length) return;
 
-    const $button = $(`
-        <div id="bp-toggle-button" class="drawer">
-            <div class="drawer-toggle">
-                <div id="bp-toggle-icon" class="drawer-icon fa-solid fa-mobile-screen-button fa-fw closedIcon"
+    // Build the full drawer structure matching ST's native pattern
+    const $drawer = $(`
+        <div id="burnerphone-drawer" class="drawer">
+            <div class="drawer-toggle drawer-header">
+                <div id="burnerphoneIcon" class="drawer-icon fa-solid fa-mobile-screen-button fa-fw closedIcon"
                      title="BurnerPhone"></div>
+            </div>
+            <div id="burnerphone-panel" class="drawer-content closedDrawer fillRight">
+                <div id="burnerphone-panelheader" class="fa-solid fa-grip drag-grabber"></div>
+                <div class="scrollableInner bp-panel-inner">
+                </div>
             </div>
         </div>
     `);
 
-    $('#top-settings-holder').append($button);
-    $('#bp-toggle-icon').off('click').on('click', togglePanel);
+    // Inject chat panel HTML into the scrollable inner area
+    $drawer.find('.bp-panel-inner').append(chatPanelHtml);
+
+    // Add to top-settings-holder (after the last existing drawer)
+    $('#top-settings-holder').append($drawer);
+
+    // CRITICAL: Bind the drawer toggle — ST's initial binding already ran at page load,
+    // so dynamically-added drawers need explicit binding to doNavbarIconClick
+    $drawer.find('.drawer-toggle').on('click', doNavbarIconClick);
 }
 
 // ==========================================================================
@@ -872,18 +863,23 @@ jQuery(async function () {
     const settingsHtml = await renderExtensionTemplateAsync(EXTENSION_PATH, 'settings');
     $('#extensions_settings2').append(settingsHtml);
 
-    // Render chat panel into right drawer, before the character list
+    // Render chat panel and create the independent drawer panel
     const chatPanelHtml = await renderExtensionTemplateAsync(EXTENSION_PATH, 'chat-panel');
-    const $target = $('#rm_characters_block');
-    if ($target.length) {
-        $target.before(chatPanelHtml);
-    } else {
-        // Fallback: append to scrollable inner in right panel
-        $('#right-nav-panel .scrollableInner').prepend(chatPanelHtml);
-    }
+    createDrawerPanel(chatPanelHtml);
 
-    // Add top bar icon
-    addTopBarIcon();
+    // Watch for drawer open to refresh UI (detect class change on drawer-content)
+    const panelEl = document.getElementById('burnerphone-panel');
+    if (panelEl) {
+        const observer = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+                if (m.attributeName === 'class' && panelEl.classList.contains('openDrawer')) {
+                    onDrawerOpened();
+                    break;
+                }
+            }
+        });
+        observer.observe(panelEl, { attributes: true, attributeFilter: ['class'] });
+    }
 
     // Load settings and bind events
     loadSettingsUI();
@@ -905,5 +901,5 @@ jQuery(async function () {
         switchToConversation(activeKey);
     }
 
-    console.log('[BurnerPhone] Extension loaded (v0.2)');
+    console.log('[BurnerPhone] Extension loaded (v0.3)');
 });

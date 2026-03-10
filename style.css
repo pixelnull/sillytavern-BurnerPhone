@@ -1,14 +1,31 @@
 /* ============================================================
-   BurnerPhone — Inline Drawer Chat Panel
+   BurnerPhone — Independent Drawer Panel Styles
    ============================================================ */
 
-/* Drawer in right panel */
-.bp-drawer {
-    margin-bottom: 5px;
+/* ---- Panel inner layout ---- */
+
+.bp-panel-inner {
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
 }
 
-.bp-drawer .inline-drawer-header {
+.bp-panel-content {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+/* ---- Title bar ---- */
+
+.bp-panel-title {
+    display: flex;
+    align-items: center;
     gap: 8px;
+    padding: 4px 0;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
 }
 
 .bp-header-label {
@@ -148,7 +165,8 @@
 /* ---- Chat Area ---- */
 
 .bp-chat-area {
-    height: 400px;
+    flex: 1;
+    min-height: 200px;
     overflow-y: auto;
     overflow-x: hidden;
     border: 1px solid var(--SmartThemeBorderColor);
@@ -298,12 +316,6 @@
 @keyframes bp-pulse {
     0%, 100% { opacity: 0.6; }
     50% { opacity: 1; }
-}
-
-/* ---- Top bar icon ---- */
-
-#bp-toggle-icon {
-    cursor: pointer;
 }
 
 /* ---- Settings specific ---- */

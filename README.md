@@ -63,12 +63,12 @@ The prompt template supports these placeholders:
 
 3. The extension appears as:
    - A phone icon in the top settings bar
-   - An inline section in the right drawer (Character Management panel)
+   - Its own slide-out panel (like AI Config or Character Manager)
    - Settings in the Extensions settings panel
 
 ## Usage
 
-1. Click the phone icon in the top bar (or expand the BurnerPhone section in the right drawer)
+1. Click the phone icon in the top bar to open the BurnerPhone panel
 2. **From** defaults to you. Change it to puppet another character
 3. Type a character name in **To** (or pick from autocomplete suggestions)
 4. Click the arrow button to start a conversation
