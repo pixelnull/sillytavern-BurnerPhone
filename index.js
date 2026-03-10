@@ -306,17 +306,19 @@ async function sendPmMessage(text) {
     $('#bp_input').val('');
     saveSettingsDebounced();
 
-    // Render immediately
-    console.log('[BurnerPhone] Rendering from message and starting generation...');
-    renderConversation();
-    scrollChatToBottom();
-
-    // Generate
-    isGenerating = true;
-    setStatus('Generating...', true);
-    setSendEnabled(false);
-
+    // Wrap everything in try/catch — errors before the old try block were silently dying
     try {
+        console.log('[BurnerPhone] Rendering from message...');
+        renderConversation();
+        console.log('[BurnerPhone] Rendered OK. Scrolling...');
+        scrollChatToBottom();
+        console.log('[BurnerPhone] Scroll OK. Setting generate state...');
+
+        isGenerating = true;
+        setStatus('Generating...', true);
+        setSendEnabled(false);
+
+        console.log('[BurnerPhone] Building prompt...');
         const prompt = buildPromptFromTemplate(convo);
         lastSentPrompt = prompt;
         updatePromptViewer();
@@ -325,7 +327,7 @@ async function sendPmMessage(text) {
 
         const response = await generateQuietPrompt({
             quietPrompt: prompt,
-            skipWIAN: !convo.pmSeesWorld,  // true = isolated, false = full pipeline
+            skipWIAN: !convo.pmSeesWorld,
             quietName: convo.to.name,
         });
 
@@ -345,8 +347,9 @@ async function sendPmMessage(text) {
             setStatus('Empty response received');
         }
     } catch (err) {
-        console.error('[BurnerPhone] Generation error:', err);
-        setStatus(`Error: ${err.message || 'Generation failed'}`);
+        console.error('[BurnerPhone] GENERATION ERROR:', err);
+        console.error('[BurnerPhone] Stack:', err?.stack);
+        setStatus(`Error: ${err?.message || 'Generation failed'}`);
     } finally {
         isGenerating = false;
         setSendEnabled(true);
