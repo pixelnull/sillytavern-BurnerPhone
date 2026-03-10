@@ -1,0 +1,80 @@
+<div class="burner-phone-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>BurnerPhone</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="flex-container">
+                <label class="checkbox_label" for="bp_enabled">
+                    <input id="bp_enabled" type="checkbox">
+                    <span>Enable BurnerPhone</span>
+                </label>
+            </div>
+
+            <hr>
+            <h4>Defaults for New Conversations</h4>
+
+            <div class="flex-container">
+                <label class="checkbox_label" for="bp_default_pm_sees_chat">
+                    <input id="bp_default_pm_sees_chat" type="checkbox">
+                    <span>PM sees main chat</span>
+                </label>
+            </div>
+            <div class="flex-container">
+                <label class="checkbox_label" for="bp_default_chat_sees_pm">
+                    <input id="bp_default_chat_sees_pm" type="checkbox">
+                    <span>Main chat sees PM</span>
+                </label>
+            </div>
+
+            <hr>
+            <h4>Generation</h4>
+
+            <div class="flex-container flexFlowColumn">
+                <label for="bp_pm_scan_depth">PM messages in context</label>
+                <input id="bp_pm_scan_depth" class="text_pole wide100p" type="number" min="1" max="50" value="10">
+            </div>
+            <div class="flex-container flexFlowColumn">
+                <label for="bp_main_chat_scan_depth">Main chat messages in PM context (when enabled)</label>
+                <input id="bp_main_chat_scan_depth" class="text_pole wide100p" type="number" min="1" max="50" value="10">
+            </div>
+
+            <hr>
+            <h4>Main Chat Injection (when "Main chat sees PM" is on)</h4>
+
+            <div class="flex-container flexFlowColumn">
+                <label for="bp_injection_position">Injection Position</label>
+                <select id="bp_injection_position" class="text_pole wide100p">
+                    <option value="0">In Prompt</option>
+                    <option value="1">In Chat</option>
+                    <option value="2">Before Prompt</option>
+                </select>
+            </div>
+            <div class="flex-container flexFlowColumn">
+                <label for="bp_injection_depth">Injection Depth (for In Chat)</label>
+                <input id="bp_injection_depth" class="text_pole wide100p" type="number" min="0" max="100" value="4">
+            </div>
+            <div class="flex-container flexFlowColumn">
+                <label for="bp_injection_role">Injection Role</label>
+                <select id="bp_injection_role" class="text_pole wide100p">
+                    <option value="0">System</option>
+                    <option value="1">User</option>
+                    <option value="2">Assistant</option>
+                </select>
+            </div>
+            <div class="flex-container flexFlowColumn">
+                <label for="bp_injection_max_messages">Max PM messages to inject</label>
+                <input id="bp_injection_max_messages" class="text_pole wide100p" type="number" min="1" max="100" value="20">
+            </div>
+
+            <hr>
+            <div class="flex-container">
+                <label class="checkbox_label" for="bp_debug_mode">
+                    <input id="bp_debug_mode" type="checkbox">
+                    <span>Debug Mode</span>
+                </label>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,243 @@
+/* BurnerPhone - Floating Chat Panel */
+
+#bpChatPanel {
+    position: fixed;
+    width: 380px;
+    height: 520px;
+    min-width: 300px;
+    min-height: 350px;
+    display: flex;
+    flex-direction: column;
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    z-index: 9990;
+    resize: both;
+    overflow: hidden;
+}
+
+#bpChatPanel .panelControlBar {
+    display: flex;
+    align-items: center;
+    padding: 6px 10px;
+    gap: 8px;
+    background: var(--SmartThemeBlurTintColor);
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    cursor: default;
+}
+
+#bpChatPanel .bp-panel-title {
+    flex: 1;
+    font-weight: bold;
+    font-size: 0.9em;
+    color: var(--SmartThemeBodyColor);
+}
+
+#bpChatPanel .bp-panel-controls {
+    display: flex;
+    gap: 8px;
+}
+
+#bpChatPanel .bp-panel-controls > div {
+    cursor: pointer;
+    opacity: 0.7;
+    font-size: 0.9em;
+}
+
+#bpChatPanel .bp-panel-controls > div:hover {
+    opacity: 1;
+}
+
+/* Character Selector */
+.bp-char-selector {
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.bp-char-selector .text_pole {
+    font-size: 0.85em;
+    padding: 4px 8px;
+}
+
+.bp-char-selector .menu_button {
+    padding: 4px 10px;
+    font-size: 0.85em;
+}
+
+/* Active Conversation Header */
+.bp-active-header {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    background: var(--SmartThemeBlurTintColor);
+}
+
+.bp-active-name {
+    font-weight: bold;
+    font-size: 0.95em;
+    color: var(--SmartThemeBodyColor);
+}
+
+.bp-toggles {
+    display: flex;
+    gap: 12px;
+    margin-top: 4px;
+}
+
+.bp-toggle-label {
+    font-size: 0.8em !important;
+    opacity: 0.85;
+}
+
+/* Chat Area */
+.bp-chat-area {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+}
+
+.bp-chat-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+}
+
+.bp-empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--SmartThemeBodyColor);
+    opacity: 0.5;
+    font-style: italic;
+    font-size: 0.9em;
+}
+
+/* Chat Bubbles */
+.bp-message {
+    max-width: 85%;
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 0.9em;
+    line-height: 1.4;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+}
+
+.bp-message-user {
+    align-self: flex-end;
+    background: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeBodyColor);
+    border-bottom-right-radius: 4px;
+}
+
+.bp-message-character {
+    align-self: flex-start;
+    background: var(--SmartThemeBorderColor);
+    color: var(--SmartThemeBodyColor);
+    border-bottom-left-radius: 4px;
+}
+
+.bp-message-timestamp {
+    font-size: 0.7em;
+    opacity: 0.5;
+    margin-top: 2px;
+}
+
+.bp-message-user .bp-message-timestamp {
+    text-align: right;
+}
+
+/* Input Area */
+.bp-input-area {
+    display: flex;
+    gap: 6px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    align-items: flex-end;
+}
+
+.bp-input-text {
+    flex: 1;
+    resize: none;
+    font-size: 0.9em;
+    min-height: 36px;
+    max-height: 100px;
+    padding: 6px 10px;
+}
+
+.bp-send-btn {
+    padding: 6px 12px;
+    align-self: flex-end;
+}
+
+.bp-send-btn.disabled {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+/* Status bar */
+.bp-status {
+    padding: 2px 10px 4px;
+    font-size: 0.75em;
+    color: var(--SmartThemeBodyColor);
+    opacity: 0.6;
+    text-align: center;
+    min-height: 1.2em;
+}
+
+.bp-status.generating {
+    opacity: 1;
+    color: var(--SmartThemeQuoteColor);
+}
+
+/* Top bar toggle button */
+#bp-toggle-icon {
+    cursor: pointer;
+    font-size: 1em;
+}
+
+#bp-toggle-icon.has-conversation {
+    color: var(--SmartThemeQuoteColor);
+}
+
+/* Conversation list for switching */
+.bp-convo-list {
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    max-height: 80px;
+    overflow-y: auto;
+}
+
+.bp-convo-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8em;
+}
+
+.bp-convo-item:hover {
+    background: var(--SmartThemeBorderColor);
+}
+
+.bp-convo-item.active {
+    background: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeBodyColor);
+}
+
+.bp-convo-delete {
+    opacity: 0.5;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+
+.bp-convo-delete:hover {
+    opacity: 1;
+    color: red;
+}

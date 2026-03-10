@@ -1,0 +1,58 @@
+<div id="bpChatPanel" class="bp-panel draggable" style="display: none;">
+    <div class="panelControlBar flex-container">
+        <div id="bpChatPanelheader" class="fa-solid fa-grip drag-grabber hoverglow"></div>
+        <span class="bp-panel-title">BurnerPhone</span>
+        <div class="bp-panel-controls">
+            <div id="bpClearChat" class="fa-solid fa-trash-can hoverglow" title="Clear conversation"></div>
+            <div id="bpPanelClose" class="fa-solid fa-circle-xmark hoverglow dragClose" title="Close"></div>
+        </div>
+    </div>
+
+    <!-- Character Selection -->
+    <div class="bp-char-selector">
+        <div class="flex-container flexGap5">
+            <select id="bp_char_select" class="text_pole flex1" title="Select a character card">
+                <option value="">-- Character Card --</option>
+            </select>
+        </div>
+        <div class="flex-container flexGap5">
+            <input id="bp_char_typed" type="text" class="text_pole flex1" placeholder="...or type a name">
+            <div id="bp_char_go" class="menu_button" title="Start conversation">
+                <i class="fa-solid fa-arrow-right"></i>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active conversation header -->
+    <div id="bp_active_header" class="bp-active-header" style="display: none;">
+        <span id="bp_active_name" class="bp-active-name"></span>
+        <div class="bp-toggles">
+            <label class="checkbox_label bp-toggle-label" for="bp_toggle_sees_chat" title="PM character can see main chat history">
+                <input id="bp_toggle_sees_chat" type="checkbox">
+                <span>PM sees chat</span>
+            </label>
+            <label class="checkbox_label bp-toggle-label" for="bp_toggle_chat_sees" title="Main chat generation includes PM conversation">
+                <input id="bp_toggle_chat_sees" type="checkbox">
+                <span>Chat sees PM</span>
+            </label>
+        </div>
+    </div>
+
+    <!-- Chat Messages Area -->
+    <div id="bp_chat_area" class="bp-chat-area">
+        <div id="bp_chat_messages" class="bp-chat-messages">
+            <div class="bp-empty-state">Select a character or type a name to start a conversation.</div>
+        </div>
+    </div>
+
+    <!-- Input Area -->
+    <div id="bp_input_area" class="bp-input-area" style="display: none;">
+        <textarea id="bp_input" class="text_pole bp-input-text" placeholder="Type a message..." rows="2"></textarea>
+        <div id="bp_send" class="menu_button bp-send-btn" title="Send (Enter)">
+            <i class="fa-solid fa-paper-plane"></i>
+        </div>
+    </div>
+
+    <!-- Status -->
+    <div id="bp_status" class="bp-status"></div>
+</div>
