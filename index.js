@@ -276,11 +276,21 @@ function buildPromptFromTemplate(conversation) {
 // ==========================================================================
 
 async function sendPmMessage(text) {
-    if (!text || !text.trim()) return;
-    if (isGenerating) return;
+    console.log('[BurnerPhone] sendPmMessage called, text:', text ? text.substring(0, 50) : '(empty)');
+    if (!text || !text.trim()) {
+        setStatus('Type a message first');
+        return;
+    }
+    if (isGenerating) {
+        setStatus('Already generating...');
+        return;
+    }
 
     const convo = getActiveConversation();
-    if (!convo) return;
+    if (!convo) {
+        setStatus('No active conversation — start one first');
+        return;
+    }
 
     const trimmed = text.trim();
 
@@ -701,8 +711,9 @@ function bindSettingsEvents() {
 // ==========================================================================
 
 function bindChatPanelEvents() {
-    // Start conversation from From/To inputs
-    $('#bp_start_convo').off('click').on('click', function () {
+    // Start conversation from From/To inputs — delegated
+    $(document).off('click.bp_start', '#bp_start_convo').on('click.bp_start', '#bp_start_convo', function () {
+        console.log('[BurnerPhone] Start conversation clicked');
         const fromVal = $('#bp_from').val();
         const toVal = $('#bp_to').val();
         const from = parseIdentityInput(fromVal);
@@ -719,32 +730,34 @@ function bindChatPanelEvents() {
         // Don't clear To — user may want to keep chatting with same person
     });
 
-    // Enter key on To input starts conversation
-    $('#bp_to').off('keydown').on('keydown', function (e) {
+    // Enter key on To input starts conversation — delegated
+    $(document).off('keydown.bp_to', '#bp_to').on('keydown.bp_to', '#bp_to', function (e) {
         if (e.key === 'Enter') {
             e.preventDefault();
             $('#bp_start_convo').trigger('click');
         }
     });
 
-    // Send message
-    $('#bp_send').off('click').on('click', function () {
+    // Send message (use delegation on the drawer panel for reliability)
+    $(document).off('click.bp_send', '#bp_send').on('click.bp_send', '#bp_send', function () {
+        console.log('[BurnerPhone] Send button clicked');
         sendPmMessage($('#bp_input').val());
     });
 
-    // Enter to send (shift+enter for newline)
-    $('#bp_input').off('keydown').on('keydown', function (e) {
+    // Enter to send (shift+enter for newline) — delegated
+    $(document).off('keydown.bp_input', '#bp_input').on('keydown.bp_input', '#bp_input', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) {
+            console.log('[BurnerPhone] Enter pressed in input');
             e.preventDefault();
             sendPmMessage($(this).val());
         }
     });
 
-    // Draft auto-save
-    $('#bp_input').off('input').on('input', saveDraftDebounced);
+    // Draft auto-save — delegated
+    $(document).off('input.bp_draft', '#bp_input').on('input.bp_draft', '#bp_input', saveDraftDebounced);
 
-    // Per-conversation toggles
-    $('#bp_toggle_sees_world').off('change').on('change', function () {
+    // Per-conversation toggles — delegated
+    $(document).off('change.bp_world', '#bp_toggle_sees_world').on('change.bp_world', '#bp_toggle_sees_world', function () {
         const convo = getActiveConversation();
         if (convo) {
             convo.pmSeesWorld = $(this).prop('checked');
@@ -753,7 +766,7 @@ function bindChatPanelEvents() {
         }
     });
 
-    $('#bp_toggle_story_sees').off('change').on('change', function () {
+    $(document).off('change.bp_story', '#bp_toggle_story_sees').on('change.bp_story', '#bp_toggle_story_sees', function () {
         const convo = getActiveConversation();
         if (convo) {
             convo.storySeesPm = $(this).prop('checked');
@@ -766,8 +779,8 @@ function bindChatPanelEvents() {
         }
     });
 
-    // Clear conversation
-    $('#bpClearChat').off('click').on('click', function () {
+    // Clear conversation — delegated
+    $(document).off('click.bp_clear', '#bpClearChat').on('click.bp_clear', '#bpClearChat', function () {
         const convo = getActiveConversation();
         if (!convo) return;
         if (!confirm(`Clear all messages in this conversation?`)) return;
@@ -777,8 +790,8 @@ function bindChatPanelEvents() {
         setStatus('Conversation cleared');
     });
 
-    // Prompt viewer toggle
-    $('#bpViewPrompt').off('click').on('click', function () {
+    // Prompt viewer toggle — delegated
+    $(document).off('click.bp_viewprompt', '#bpViewPrompt').on('click.bp_viewprompt', '#bpViewPrompt', function () {
         const $viewer = $('#bp_prompt_viewer');
         if ($viewer.is(':visible')) {
             $viewer.hide();
@@ -788,7 +801,7 @@ function bindChatPanelEvents() {
         }
     });
 
-    $('#bpClosePrompt').off('click').on('click', function () {
+    $(document).off('click.bp_closeprompt', '#bpClosePrompt').on('click.bp_closeprompt', '#bpClosePrompt', function () {
         $('#bp_prompt_viewer').hide();
     });
 
