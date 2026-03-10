@@ -307,6 +307,7 @@ async function sendPmMessage(text) {
     saveSettingsDebounced();
 
     // Render immediately
+    console.log('[BurnerPhone] Rendering from message and starting generation...');
     renderConversation();
     scrollChatToBottom();
 
@@ -319,13 +320,16 @@ async function sendPmMessage(text) {
         const prompt = buildPromptFromTemplate(convo);
         lastSentPrompt = prompt;
         updatePromptViewer();
-        debug('PM prompt:', prompt);
+        console.log('[BurnerPhone] Built prompt, length:', prompt.length);
+        console.log('[BurnerPhone] Calling generateQuietPrompt with skipWIAN:', !convo.pmSeesWorld, 'quietName:', convo.to.name);
 
         const response = await generateQuietPrompt({
             quietPrompt: prompt,
             skipWIAN: !convo.pmSeesWorld,  // true = isolated, false = full pipeline
             quietName: convo.to.name,
         });
+
+        console.log('[BurnerPhone] Got response, length:', response ? response.length : 'null/empty');
 
         if (response && response.trim()) {
             convo.messages.push({
@@ -346,6 +350,7 @@ async function sendPmMessage(text) {
     } finally {
         isGenerating = false;
         setSendEnabled(true);
+        console.log('[BurnerPhone] Generation complete, isGenerating reset to false');
     }
 }
 
