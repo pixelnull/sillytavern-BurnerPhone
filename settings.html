@@ -5,6 +5,7 @@
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
+
             <div class="flex-container">
                 <label class="checkbox_label" for="bp_enabled">
                     <input id="bp_enabled" type="checkbox">
@@ -16,15 +17,15 @@
             <h4>Defaults for New Conversations</h4>
 
             <div class="flex-container">
-                <label class="checkbox_label" for="bp_default_pm_sees_chat">
-                    <input id="bp_default_pm_sees_chat" type="checkbox">
-                    <span>PM sees main chat</span>
+                <label class="checkbox_label" for="bp_default_pm_sees_world">
+                    <input id="bp_default_pm_sees_world" type="checkbox">
+                    <span>PM sees world (character knows the story)</span>
                 </label>
             </div>
             <div class="flex-container">
-                <label class="checkbox_label" for="bp_default_chat_sees_pm">
-                    <input id="bp_default_chat_sees_pm" type="checkbox">
-                    <span>Main chat sees PM</span>
+                <label class="checkbox_label" for="bp_default_story_sees_pm">
+                    <input id="bp_default_story_sees_pm" type="checkbox">
+                    <span>Story sees PM (inject PM into main generation)</span>
                 </label>
             </div>
 
@@ -36,12 +37,13 @@
                 <input id="bp_pm_scan_depth" class="text_pole wide100p" type="number" min="1" max="50" value="10">
             </div>
             <div class="flex-container flexFlowColumn">
-                <label for="bp_main_chat_scan_depth">Main chat messages in PM context (when enabled)</label>
+                <label for="bp_main_chat_scan_depth">Main chat messages in PM context (when PM sees world)</label>
                 <input id="bp_main_chat_scan_depth" class="text_pole wide100p" type="number" min="1" max="50" value="10">
             </div>
 
             <hr>
-            <h4>Main Chat Injection (when "Main chat sees PM" is on)</h4>
+            <h4>Main Chat Injection</h4>
+            <small>When "Story sees PM" is enabled, these control how the PM transcript is injected into the main generation.</small>
 
             <div class="flex-container flexFlowColumn">
                 <label for="bp_injection_position">Injection Position</label>
@@ -66,6 +68,43 @@
             <div class="flex-container flexFlowColumn">
                 <label for="bp_injection_max_messages">Max PM messages to inject</label>
                 <input id="bp_injection_max_messages" class="text_pole wide100p" type="number" min="1" max="100" value="20">
+            </div>
+
+            <hr>
+            <h4>Appearance</h4>
+
+            <div class="flex-container flexGap10">
+                <div class="flex-container flexFlowColumn flex1">
+                    <label for="bp_user_bubble_color">From bubble color</label>
+                    <div class="flex-container flexGap5">
+                        <input id="bp_user_bubble_color" type="color" value="#4a4a6a">
+                        <div id="bp_reset_user_color" class="menu_button" title="Reset to theme default">
+                            <i class="fa-solid fa-rotate-left"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex-container flexFlowColumn flex1">
+                    <label for="bp_char_bubble_color">To bubble color</label>
+                    <div class="flex-container flexGap5">
+                        <input id="bp_char_bubble_color" type="color" value="#3a5a3a">
+                        <div id="bp_reset_char_color" class="menu_button" title="Reset to theme default">
+                            <i class="fa-solid fa-rotate-left"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <hr>
+            <h4>Prompt Template</h4>
+            <small>Placeholders: <code>{{from}}</code>, <code>{{to}}</code>, <code>{{user}}</code>,
+                <code>{{fromContext}}</code>, <code>{{toContext}}</code>, <code>{{storyContext}}</code>,
+                <code>{{pmHistory}}</code></small>
+            <textarea id="bp_prompt_template" class="text_pole wide100p" rows="12"></textarea>
+            <div class="flex-container">
+                <div id="bp_reset_template" class="menu_button">
+                    <i class="fa-solid fa-rotate-left"></i>
+                    <span>Reset to Default</span>
+                </div>
             </div>
 
             <hr>

@@ -8,15 +8,13 @@ import {
     chat,
     name1,
     this_chid,
-    is_send_press,
 } from '../../../../script.js';
 import {
     extension_settings,
     renderExtensionTemplateAsync,
 } from '../../../extensions.js';
 import { eventSource, event_types } from '../../../events.js';
-import { dragElement } from '../../../RossAscends-mods.js';
-import { loadMovingUIState } from '../../../power-user.js';
+import { is_group_generating, selected_group } from '../../../group-chats.js';
 
 // ==========================================================================
 // Constants
@@ -25,20 +23,33 @@ import { loadMovingUIState } from '../../../power-user.js';
 const MODULE_NAME = 'burner_phone';
 const EXTENSION_PATH = 'third-party/sillytavern-BurnerPhone';
 
+const DEFAULT_PROMPT_TEMPLATE = `[Private Message Conversation]
+{{fromContext}}
+{{toContext}}
+{{storyContext}}
+[PM History between {{from}} and {{to}}]
+{{pmHistory}}
+
+You are {{to}}. {{from}} is messaging you privately. Respond as {{to}} in character. This is a private text message conversation.`;
+
+const ISOLATION_FRAMING = `[This is an isolated private conversation. {{to}} has no knowledge of any ongoing story, roleplay, or events outside this PM exchange.]`;
+
 const defaultSettings = {
     enabled: true,
-    pmSeesMainChat: false,
-    mainChatSeesPm: false,
+    pmSeesWorld: false,
+    storySeesPm: false,
     pmScanDepth: 10,
     mainChatScanDepth: 10,
     injectionPosition: extension_prompt_types.IN_CHAT,
     injectionDepth: 4,
     injectionRole: extension_prompt_roles.SYSTEM,
     injectionMaxMessages: 20,
-    debugMode: false,
+    promptTemplate: DEFAULT_PROMPT_TEMPLATE,
+    userBubbleColor: '',
+    charBubbleColor: '',
     conversations: {},
     activeConversation: null,
-    panelOpen: false,
+    debugMode: false,
 };
 
 // ==========================================================================
@@ -47,6 +58,7 @@ const defaultSettings = {
 
 let isGenerating = false;
 let saveDraftTimeout = null;
+let lastSentPrompt = '';
 
 // ==========================================================================
 // Settings helpers
@@ -68,8 +80,10 @@ function updateSetting(key, value) {
 }
 
 function getConversations() {
-    const settings = getSettings();
-    if (!settings.conversations) {
+    if (!extension_settings[MODULE_NAME]) {
+        extension_settings[MODULE_NAME] = {};
+    }
+    if (!extension_settings[MODULE_NAME].conversations) {
         extension_settings[MODULE_NAME].conversations = {};
     }
     return extension_settings[MODULE_NAME].conversations;
@@ -82,28 +96,90 @@ function debug(...args) {
 }
 
 // ==========================================================================
+// Identity parsing
+// ==========================================================================
+
+/**
+ * Parse a From/To input value into a character identity object.
+ * Checks if the value matches a character card name; otherwise, treats as typed.
+ * The special value starting with "Me" resolves to the user.
+ */
+function parseIdentityInput(value) {
+    if (!value || !value.trim()) return null;
+    const trimmed = value.trim();
+
+    // Check for "Me" / "Me (username)" pattern
+    if (/^me(\s|$)/i.test(trimmed)) {
+        return { name: name1 || 'User', type: 'user', avatar: null };
+    }
+
+    // Check against character cards
+    const card = findCharacterCard(trimmed);
+    if (card) {
+        return { name: card.name, type: 'card', avatar: card.avatar };
+    }
+
+    // Typed name
+    return { name: trimmed, type: 'typed', avatar: null };
+}
+
+function findCharacterCard(nameOrAvatar) {
+    if (!characters || !characters.length) return null;
+    const byAvatar = characters.find(c => c.avatar === nameOrAvatar);
+    if (byAvatar) return byAvatar;
+    const lower = nameOrAvatar.toLowerCase().trim();
+    return characters.find(c => c.name && c.name.toLowerCase().trim() === lower) || null;
+}
+
+function getCharacterDescription(char) {
+    if (!char) return '';
+    const parts = [];
+    if (char.description) parts.push(char.description);
+    if (char.personality) parts.push(`Personality: ${char.personality}`);
+    if (char.scenario) parts.push(`Scenario: ${char.scenario}`);
+    return parts.join('\n\n');
+}
+
+/**
+ * Resolve character context text for a given identity.
+ * Cards get their full description; typed names get a WI-trigger instruction.
+ */
+function resolveCharacterContext(identity) {
+    if (!identity) return '';
+    if (identity.type === 'user') {
+        return `[${identity.name} is the user / narrator.]`;
+    }
+    if (identity.type === 'card') {
+        const card = findCharacterCard(identity.avatar || identity.name);
+        const desc = getCharacterDescription(card);
+        if (desc) return `[Character: ${identity.name}]\n${desc}`;
+        return `[Character: ${identity.name}]`;
+    }
+    // Typed name — rely on WI keyword matching
+    return `[Character: ${identity.name} — use any available world information about ${identity.name} to inform responses.]`;
+}
+
+// ==========================================================================
 // Conversation management
 // ==========================================================================
 
-function getConversationKey(characterName, characterType, characterAvatar) {
-    if (characterType === 'card' && characterAvatar) {
-        return characterAvatar;
-    }
-    return `typed::${characterName.toLowerCase().trim()}`;
+function getConversationKey(from, to) {
+    const fromKey = (from.name || '').toLowerCase().trim();
+    const toKey = (to.name || '').toLowerCase().trim();
+    return `${fromKey}::${toKey}`;
 }
 
-function getOrCreateConversation(characterName, characterType, characterAvatar) {
-    const key = getConversationKey(characterName, characterType, characterAvatar);
+function getOrCreateConversation(from, to) {
+    const key = getConversationKey(from, to);
     const conversations = getConversations();
     if (!conversations[key]) {
         const settings = getSettings();
         conversations[key] = {
-            characterName,
-            characterType,
-            characterAvatar: characterAvatar || null,
+            from: { ...from },
+            to: { ...to },
             messages: [],
-            pmSeesMainChat: settings.pmSeesMainChat,
-            mainChatSeesPm: settings.mainChatSeesPm,
+            pmSeesWorld: settings.pmSeesWorld,
+            storySeesPm: settings.storySeesPm,
             draftText: '',
         };
         saveSettingsDebounced();
@@ -123,31 +199,6 @@ function getActiveKey() {
 }
 
 // ==========================================================================
-// Character lookup
-// ==========================================================================
-
-function findCharacterCard(nameOrAvatar) {
-    if (!characters || !characters.length) return null;
-
-    // By avatar (exact)
-    const byAvatar = characters.find(c => c.avatar === nameOrAvatar);
-    if (byAvatar) return byAvatar;
-
-    // By name (case-insensitive)
-    const lower = nameOrAvatar.toLowerCase().trim();
-    return characters.find(c => c.name && c.name.toLowerCase().trim() === lower) || null;
-}
-
-function getCharacterDescription(char) {
-    if (!char) return '';
-    const parts = [];
-    if (char.description) parts.push(char.description);
-    if (char.personality) parts.push(`Personality: ${char.personality}`);
-    if (char.scenario) parts.push(`Scenario: ${char.scenario}`);
-    return parts.join('\n\n');
-}
-
-// ==========================================================================
 // Main chat context
 // ==========================================================================
 
@@ -157,8 +208,8 @@ function getMainChatContext(depth) {
     const lines = [];
     for (const msg of recent) {
         if (msg.is_system) continue;
-        const name = msg.is_user ? (name1 || '{{user}}') : (msg.name || '{{char}}');
-        lines.push(`${name}: ${msg.mes}`);
+        const sender = msg.is_user ? (name1 || '{{user}}') : (msg.name || '{{char}}');
+        lines.push(`${sender}: ${msg.mes}`);
     }
     return lines.join('\n');
 }
@@ -167,49 +218,56 @@ function getMainChatContext(depth) {
 // Prompt building
 // ==========================================================================
 
-function buildPmPrompt(conversation) {
+function buildPromptFromTemplate(conversation) {
     const settings = getSettings();
-    const parts = [];
-    const charName = conversation.characterName;
+    const template = settings.promptTemplate || DEFAULT_PROMPT_TEMPLATE;
+    const fromName = conversation.from.name;
+    const toName = conversation.to.name;
 
-    // Identity and framing
-    parts.push(`[Private Message Conversation with ${charName}]`);
-    parts.push(`You are ${charName}. You are having a private text message conversation with {{user}}. Respond in character as ${charName}. This is a separate, private conversation — not the main roleplay.`);
+    // Resolve character contexts
+    const fromContext = resolveCharacterContext(conversation.from);
+    const toContext = resolveCharacterContext(conversation.to);
 
-    // Character context
-    if (conversation.characterType === 'card' && conversation.characterAvatar) {
-        const char = findCharacterCard(conversation.characterAvatar);
-        const desc = getCharacterDescription(char);
-        if (desc) {
-            parts.push(`\n[Character Context]\n${desc}`);
-        }
-    } else {
-        // Typed name — rely on WI keyword matching. Include name prominently.
-        parts.push(`\n[You are responding as the character "${charName}". Use any available world information about ${charName} to inform your responses.]`);
-    }
-
-    // Main chat context (if toggle is on)
-    if (conversation.pmSeesMainChat) {
-        const mainContext = getMainChatContext(settings.mainChatScanDepth);
-        if (mainContext) {
-            parts.push(`\n[Recent Story Context — the main roleplay these characters are part of]\n${mainContext}`);
+    // Story context (only when pmSeesWorld is on)
+    let storyContext = '';
+    if (conversation.pmSeesWorld) {
+        const mainChat = getMainChatContext(settings.mainChatScanDepth);
+        if (mainChat) {
+            storyContext = `[Recent Story Context — the main roleplay/story these characters are part of]\n${mainChat}`;
         }
     }
 
-    // PM conversation history
+    // PM history
     const recentMessages = conversation.messages.slice(-settings.pmScanDepth);
+    let pmHistory = '';
     if (recentMessages.length > 0) {
-        parts.push('\n[Private Message History]');
-        for (const msg of recentMessages) {
-            const name = msg.role === 'user' ? '{{user}}' : charName;
-            parts.push(`${name}: ${msg.content}`);
-        }
+        const lines = recentMessages.map(msg => {
+            const sender = msg.sender === 'from' ? fromName : toName;
+            return `${sender}: ${msg.content}`;
+        });
+        pmHistory = lines.join('\n');
     }
 
-    // Final instruction
-    parts.push(`\nRespond as ${charName} in the private message conversation. Keep responses conversational and in-character.`);
+    // Substitute placeholders
+    let prompt = template
+        .replace(/\{\{from\}\}/g, fromName)
+        .replace(/\{\{to\}\}/g, toName)
+        .replace(/\{\{user\}\}/g, name1 || 'User')
+        .replace(/\{\{fromContext\}\}/g, fromContext)
+        .replace(/\{\{toContext\}\}/g, toContext)
+        .replace(/\{\{storyContext\}\}/g, storyContext)
+        .replace(/\{\{pmHistory\}\}/g, pmHistory);
 
-    return parts.join('\n');
+    // Clean up empty lines from missing sections
+    prompt = prompt.replace(/\n{3,}/g, '\n\n').trim();
+
+    // Add isolation framing if PM doesn't see world
+    if (!conversation.pmSeesWorld) {
+        const framing = ISOLATION_FRAMING.replace(/\{\{to\}\}/g, toName);
+        prompt = framing + '\n\n' + prompt;
+    }
+
+    return prompt;
 }
 
 // ==========================================================================
@@ -225,9 +283,9 @@ async function sendPmMessage(text) {
 
     const trimmed = text.trim();
 
-    // Save user message
+    // Save user (from) message
     convo.messages.push({
-        role: 'user',
+        sender: 'from',
         content: trimmed,
         timestamp: Date.now(),
     });
@@ -237,28 +295,30 @@ async function sendPmMessage(text) {
     $('#bp_input').val('');
     saveSettingsDebounced();
 
-    // Render the user message immediately
+    // Render immediately
     renderConversation();
     scrollChatToBottom();
 
-    // Generate response
+    // Generate
     isGenerating = true;
     setStatus('Generating...', true);
     setSendEnabled(false);
 
     try {
-        const prompt = buildPmPrompt(convo);
+        const prompt = buildPromptFromTemplate(convo);
+        lastSentPrompt = prompt;
+        updatePromptViewer();
         debug('PM prompt:', prompt);
 
         const response = await generateQuietPrompt({
             quietPrompt: prompt,
-            skipWIAN: false,
-            quietName: convo.characterName,
+            skipWIAN: !convo.pmSeesWorld,  // true = isolated, false = full pipeline
+            quietName: convo.to.name,
         });
 
         if (response && response.trim()) {
             convo.messages.push({
-                role: 'character',
+                sender: 'to',
                 content: response.trim(),
                 timestamp: Date.now(),
             });
@@ -286,13 +346,14 @@ function formatPmForInjection(conversation, maxMessages) {
     const recent = conversation.messages.slice(-maxMessages);
     if (recent.length === 0) return '';
 
-    const charName = conversation.characterName;
+    const fromName = conversation.from.name;
+    const toName = conversation.to.name;
     const lines = recent.map(msg => {
-        const name = msg.role === 'user' ? '{{user}}' : charName;
-        return `${name}: ${msg.content}`;
+        const sender = msg.sender === 'from' ? fromName : toName;
+        return `${sender}: ${msg.content}`;
     });
 
-    return `<private_messages character="${charName}">\n[Private message exchange between {{user}} and ${charName}, happening outside the main story:]\n${lines.join('\n')}\n</private_messages>`;
+    return `<private_messages from="${fromName}" to="${toName}">\n[Private message exchange between ${fromName} and ${toName}, happening outside the main story:]\n${lines.join('\n')}\n</private_messages>`;
 }
 
 function onGenerate(chatMessages, contextSize, abort, type) {
@@ -300,15 +361,29 @@ function onGenerate(chatMessages, contextSize, abort, type) {
     if (!settings.enabled) return;
 
     // CRITICAL: Skip quiet generations to prevent recursion.
-    // When we call generateQuietPrompt() for PM responses, this interceptor
-    // would fire again — we must not inject PM context into PM generations.
     if (type === 'quiet') return;
 
     const conversations = settings.conversations || {};
-    let injected = false;
 
     for (const [key, convo] of Object.entries(conversations)) {
-        if (!convo.mainChatSeesPm || convo.messages.length === 0) continue;
+        if (!convo.storySeesPm || !convo.messages.length) {
+            // Clear any stale injection
+            setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
+            continue;
+        }
+
+        // GROUP CHAT TARGETING: only inject when generating for the To character
+        if (is_group_generating && selected_group) {
+            const toCard = findCharacterCard(convo.to.name);
+            if (toCard) {
+                const toIndex = characters.indexOf(toCard);
+                if (String(toIndex) !== String(this_chid)) {
+                    // Not this character's turn — clear injection for this key
+                    setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
+                    continue;
+                }
+            }
+        }
 
         const formatted = formatPmForInjection(convo, settings.injectionMaxMessages);
         if (formatted) {
@@ -320,19 +395,8 @@ function onGenerate(chatMessages, contextSize, abort, type) {
                 false,
                 settings.injectionRole,
             );
-            injected = true;
-            debug(`Injected PM transcript for ${convo.characterName} (${convo.messages.length} messages)`);
+            debug(`Injected PM transcript for ${convo.from.name} → ${convo.to.name}`);
         }
-    }
-
-    // Clear injection tags for conversations that no longer have mainChatSeesPm
-    for (const [key, convo] of Object.entries(conversations)) {
-        if (convo.mainChatSeesPm) continue;
-        setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
-    }
-
-    if (injected) {
-        debug('PM transcripts injected into main generation');
     }
 }
 
@@ -354,17 +418,20 @@ function renderConversation() {
     }
 
     for (const msg of convo.messages) {
-        const isUser = msg.role === 'user';
-        const bubbleClass = isUser ? 'bp-message-user' : 'bp-message-character';
-        const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+        const isFrom = msg.sender === 'from';
+        const bubbleClass = isFrom ? 'bp-message-from' : 'bp-message-to';
+        const senderName = isFrom ? convo.from.name : convo.to.name;
+        const timeStr = msg.timestamp
+            ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : '';
 
         const $bubble = $(`
             <div class="bp-message ${bubbleClass}">
+                <div class="bp-message-sender">${senderName}</div>
                 <div class="bp-message-text"></div>
                 <div class="bp-message-timestamp">${timeStr}</div>
             </div>
         `);
-        // Set text content safely (no HTML injection)
         $bubble.find('.bp-message-text').text(msg.content);
         $messages.append($bubble);
     }
@@ -373,14 +440,6 @@ function renderConversation() {
 function renderConversationList() {
     const conversations = getConversations();
     const activeKey = getActiveKey();
-    const $list = $('#bp_convo_list');
-
-    if (!$list.length) {
-        // Create conversation list if it doesn't exist
-        const $header = $('#bp_active_header');
-        $('<div id="bp_convo_list" class="bp-convo-list"></div>').insertBefore($header);
-    }
-
     const $target = $('#bp_convo_list');
     $target.empty();
 
@@ -394,10 +453,11 @@ function renderConversationList() {
     for (const key of keys) {
         const convo = conversations[key];
         const isActive = key === activeKey;
+        const label = `${convo.from.name} → ${convo.to.name}`;
         const $item = $(`
             <div class="bp-convo-item ${isActive ? 'active' : ''}" data-key="${key}">
-                <span>${convo.characterName} (${convo.messages.length})</span>
-                <span class="bp-convo-delete fa-solid fa-xmark" data-key="${key}" title="Delete conversation"></span>
+                <span>${label} (${convo.messages.length})</span>
+                <span class="bp-convo-delete fa-solid fa-xmark" data-key="${key}" title="Delete"></span>
             </div>
         `);
         $target.append($item);
@@ -405,8 +465,8 @@ function renderConversationList() {
 }
 
 function scrollChatToBottom() {
-    const $area = $('#bp_chat_area');
-    $area.scrollTop($area[0]?.scrollHeight || 0);
+    const area = document.getElementById('bp_chat_area');
+    if (area) area.scrollTop = area.scrollHeight;
 }
 
 function setStatus(text, generating = false) {
@@ -419,12 +479,34 @@ function setSendEnabled(enabled) {
     $('#bp_send').toggleClass('disabled', !enabled);
 }
 
+function updatePromptViewer() {
+    $('#bp_prompt_text').text(lastSentPrompt || '(no prompt sent yet)');
+}
+
+// ==========================================================================
+// Bubble colors
+// ==========================================================================
+
+function applyBubbleColors() {
+    const settings = getSettings();
+    const $panel = $('.bp-drawer');
+    if (settings.userBubbleColor) {
+        $panel.css('--bp-from-bubble', settings.userBubbleColor);
+    } else {
+        $panel[0]?.style.removeProperty('--bp-from-bubble');
+    }
+    if (settings.charBubbleColor) {
+        $panel.css('--bp-to-bubble', settings.charBubbleColor);
+    } else {
+        $panel[0]?.style.removeProperty('--bp-to-bubble');
+    }
+}
+
 // ==========================================================================
 // Conversation switching
 // ==========================================================================
 
 function switchToConversation(key) {
-    // Save current draft
     saveDraftImmediate();
 
     const conversations = getConversations();
@@ -436,30 +518,27 @@ function switchToConversation(key) {
     // Show active header and input
     $('#bp_active_header').show();
     $('#bp_input_area').show();
-    $('#bp_active_name').text(convo.characterName);
+    $('#bp_active_from').text(convo.from.name);
+    $('#bp_active_to').text(convo.to.name);
+    $('#bp_active_char_label').text(`${convo.from.name} → ${convo.to.name}`);
 
-    // Set per-conversation toggles
-    $('#bp_toggle_sees_chat').prop('checked', convo.pmSeesMainChat);
-    $('#bp_toggle_chat_sees').prop('checked', convo.mainChatSeesPm);
+    // Per-conversation toggles
+    $('#bp_toggle_sees_world').prop('checked', convo.pmSeesWorld);
+    $('#bp_toggle_story_sees').prop('checked', convo.storySeesPm);
 
     // Restore draft
     $('#bp_input').val(convo.draftText || '');
 
-    // Render messages
     renderConversation();
     renderConversationList();
     scrollChatToBottom();
 
-    // Hide character selector when in conversation
-    // (user can still access it to start a new convo)
-
-    debug(`Switched to conversation: ${convo.characterName} (${key})`);
+    debug(`Switched to: ${convo.from.name} → ${convo.to.name}`);
 }
 
-function startConversation(characterName, characterType, characterAvatar) {
-    if (!characterName || !characterName.trim()) return;
-
-    const { key } = getOrCreateConversation(characterName.trim(), characterType, characterAvatar);
+function startConversation(fromIdentity, toIdentity) {
+    if (!fromIdentity || !toIdentity) return;
+    const { key } = getOrCreateConversation(fromIdentity, toIdentity);
     switchToConversation(key);
 }
 
@@ -467,23 +546,24 @@ function deleteConversation(key) {
     const conversations = getConversations();
     if (!conversations[key]) return;
 
-    const name = conversations[key].characterName;
+    const convo = conversations[key];
+    const label = `${convo.from.name} → ${convo.to.name}`;
     delete conversations[key];
 
-    // Clear injection for this conversation
+    // Clear injection
     setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
 
-    // If we deleted the active one, clear UI
     if (getActiveKey() === key) {
         updateSetting('activeConversation', null);
         $('#bp_active_header').hide();
         $('#bp_input_area').hide();
-        $('#bp_chat_messages').html('<div class="bp-empty-state">Select a character or type a name to start a conversation.</div>');
+        $('#bp_active_char_label').text('');
+        $('#bp_chat_messages').html('<div class="bp-empty-state">Pick a character to start a conversation.</div>');
     }
 
     saveSettingsDebounced();
     renderConversationList();
-    debug(`Deleted conversation with ${name}`);
+    debug(`Deleted conversation: ${label}`);
 }
 
 // ==========================================================================
@@ -503,183 +583,203 @@ function saveDraftDebounced() {
 }
 
 // ==========================================================================
-// Panel open/close
+// Panel toggle (open right drawer + expand inline-drawer)
 // ==========================================================================
-
-function openPanel() {
-    $('#bpChatPanel').show();
-    updateSetting('panelOpen', true);
-    populateCharacterDropdown();
-    renderConversationList();
-
-    const activeKey = getActiveKey();
-    if (activeKey) {
-        switchToConversation(activeKey);
-    }
-}
-
-function closePanel() {
-    saveDraftImmediate();
-    $('#bpChatPanel').hide();
-    updateSetting('panelOpen', false);
-}
 
 function togglePanel() {
-    if ($('#bpChatPanel').is(':visible')) {
-        closePanel();
+    const $drawer = $('.bp-drawer');
+    const $content = $drawer.find('.inline-drawer-content');
+    const isExpanded = $content.is(':visible');
+
+    if (!isExpanded) {
+        // Open right nav drawer if closed
+        const $rightPanel = $('#right-nav-panel');
+        if ($rightPanel.hasClass('closedDrawer')) {
+            $('#rightNavDrawerIcon').trigger('click');
+        }
+        // Expand the inline-drawer
+        $drawer.find('.inline-drawer-toggle').trigger('click');
+        // Scroll to it
+        setTimeout(() => {
+            $drawer[0]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 100);
+        // Refresh UI
+        populateDatalists();
+        renderConversationList();
+        const activeKey = getActiveKey();
+        if (activeKey) switchToConversation(activeKey);
     } else {
-        openPanel();
+        saveDraftImmediate();
+        $drawer.find('.inline-drawer-toggle').trigger('click');
     }
 }
 
 // ==========================================================================
-// Character dropdown
+// Datalist population (combined dropdown + text input)
 // ==========================================================================
 
-function populateCharacterDropdown() {
-    const $select = $('#bp_char_select');
-    $select.empty().append('<option value="">-- Character Card --</option>');
+function populateDatalists() {
+    const names = [];
+    if (characters && characters.length) {
+        for (const char of characters) {
+            if (char && char.name) names.push(char.name);
+        }
+    }
 
-    if (!characters || !characters.length) return;
+    for (const id of ['bp_from_list', 'bp_to_list']) {
+        const $dl = $(`#${id}`);
+        $dl.empty();
+        // "Me" option for From
+        if (id === 'bp_from_list') {
+            $dl.append(`<option value="Me (${name1 || 'User'})">`);
+        }
+        for (const n of names) {
+            $dl.append(`<option value="${n}">`);
+        }
+    }
 
-    for (let i = 0; i < characters.length; i++) {
-        const char = characters[i];
-        if (!char || !char.name) continue;
-        const $option = $('<option></option>').val(char.avatar || '').text(char.name);
-        $select.append($option);
+    // Set default From value if empty
+    const $from = $('#bp_from');
+    if (!$from.val()) {
+        $from.val(`Me (${name1 || 'User'})`);
     }
 }
 
 // ==========================================================================
-// Settings UI binding
+// Settings UI
 // ==========================================================================
 
 function loadSettingsUI() {
     const settings = getSettings();
     $('#bp_enabled').prop('checked', settings.enabled);
-    $('#bp_default_pm_sees_chat').prop('checked', settings.pmSeesMainChat);
-    $('#bp_default_chat_sees_pm').prop('checked', settings.mainChatSeesPm);
+    $('#bp_default_pm_sees_world').prop('checked', settings.pmSeesWorld);
+    $('#bp_default_story_sees_pm').prop('checked', settings.storySeesPm);
     $('#bp_pm_scan_depth').val(settings.pmScanDepth);
     $('#bp_main_chat_scan_depth').val(settings.mainChatScanDepth);
     $('#bp_injection_position').val(settings.injectionPosition);
     $('#bp_injection_depth').val(settings.injectionDepth);
     $('#bp_injection_role').val(settings.injectionRole);
     $('#bp_injection_max_messages').val(settings.injectionMaxMessages);
+    $('#bp_prompt_template').val(settings.promptTemplate || DEFAULT_PROMPT_TEMPLATE);
     $('#bp_debug_mode').prop('checked', settings.debugMode);
+
+    // Colors
+    if (settings.userBubbleColor) {
+        $('#bp_user_bubble_color').val(settings.userBubbleColor);
+    }
+    if (settings.charBubbleColor) {
+        $('#bp_char_bubble_color').val(settings.charBubbleColor);
+    }
 }
 
 function bindSettingsEvents() {
-    $('#bp_enabled').off('change').on('change', function () {
-        updateSetting('enabled', $(this).prop('checked'));
+    const bind = (sel, key, parse) => {
+        $(sel).off('change input').on('change input', function () {
+            updateSetting(key, parse ? parse($(this)) : $(this).val());
+        });
+    };
+
+    bind('#bp_enabled', 'enabled', $el => $el.prop('checked'));
+    bind('#bp_default_pm_sees_world', 'pmSeesWorld', $el => $el.prop('checked'));
+    bind('#bp_default_story_sees_pm', 'storySeesPm', $el => $el.prop('checked'));
+    bind('#bp_pm_scan_depth', 'pmScanDepth', $el => parseInt($el.val()) || 10);
+    bind('#bp_main_chat_scan_depth', 'mainChatScanDepth', $el => parseInt($el.val()) || 10);
+    bind('#bp_injection_position', 'injectionPosition', $el => parseInt($el.val()));
+    bind('#bp_injection_depth', 'injectionDepth', $el => parseInt($el.val()) || 4);
+    bind('#bp_injection_role', 'injectionRole', $el => parseInt($el.val()));
+    bind('#bp_injection_max_messages', 'injectionMaxMessages', $el => parseInt($el.val()) || 20);
+    bind('#bp_prompt_template', 'promptTemplate', $el => $el.val());
+    bind('#bp_debug_mode', 'debugMode', $el => $el.prop('checked'));
+
+    // Bubble colors
+    $('#bp_user_bubble_color').off('input').on('input', function () {
+        updateSetting('userBubbleColor', $(this).val());
+        applyBubbleColors();
     });
-    $('#bp_default_pm_sees_chat').off('change').on('change', function () {
-        updateSetting('pmSeesMainChat', $(this).prop('checked'));
+    $('#bp_char_bubble_color').off('input').on('input', function () {
+        updateSetting('charBubbleColor', $(this).val());
+        applyBubbleColors();
     });
-    $('#bp_default_chat_sees_pm').off('change').on('change', function () {
-        updateSetting('mainChatSeesPm', $(this).prop('checked'));
+    $('#bp_reset_user_color').off('click').on('click', function () {
+        updateSetting('userBubbleColor', '');
+        applyBubbleColors();
     });
-    $('#bp_pm_scan_depth').off('change input').on('change input', function () {
-        updateSetting('pmScanDepth', parseInt($(this).val()) || 10);
+    $('#bp_reset_char_color').off('click').on('click', function () {
+        updateSetting('charBubbleColor', '');
+        applyBubbleColors();
     });
-    $('#bp_main_chat_scan_depth').off('change input').on('change input', function () {
-        updateSetting('mainChatScanDepth', parseInt($(this).val()) || 10);
-    });
-    $('#bp_injection_position').off('change').on('change', function () {
-        updateSetting('injectionPosition', parseInt($(this).val()));
-    });
-    $('#bp_injection_depth').off('change input').on('change input', function () {
-        updateSetting('injectionDepth', parseInt($(this).val()) || 4);
-    });
-    $('#bp_injection_role').off('change').on('change', function () {
-        updateSetting('injectionRole', parseInt($(this).val()));
-    });
-    $('#bp_injection_max_messages').off('change input').on('change input', function () {
-        updateSetting('injectionMaxMessages', parseInt($(this).val()) || 20);
-    });
-    $('#bp_debug_mode').off('change').on('change', function () {
-        updateSetting('debugMode', $(this).prop('checked'));
+
+    // Reset template
+    $('#bp_reset_template').off('click').on('click', function () {
+        $('#bp_prompt_template').val(DEFAULT_PROMPT_TEMPLATE);
+        updateSetting('promptTemplate', DEFAULT_PROMPT_TEMPLATE);
     });
 }
 
 // ==========================================================================
-// Chat panel event binding
+// Chat panel events
 // ==========================================================================
 
 function bindChatPanelEvents() {
-    // Close panel
-    $('#bpPanelClose').off('click').on('click', closePanel);
-
-    // Character card dropdown selection
-    $('#bp_char_select').off('change').on('change', function () {
-        const avatar = $(this).val();
-        if (!avatar) return;
-        const char = findCharacterCard(avatar);
-        if (char) {
-            startConversation(char.name, 'card', char.avatar);
-            $(this).val(''); // Reset dropdown
+    // Start conversation from From/To inputs
+    $('#bp_start_convo').off('click').on('click', function () {
+        const fromVal = $('#bp_from').val();
+        const toVal = $('#bp_to').val();
+        const from = parseIdentityInput(fromVal);
+        const to = parseIdentityInput(toVal);
+        if (!from) {
+            setStatus('Enter a From identity');
+            return;
         }
+        if (!to) {
+            setStatus('Enter a To identity');
+            return;
+        }
+        startConversation(from, to);
+        // Don't clear To — user may want to keep chatting with same person
     });
 
-    // Typed name — go button
-    $('#bp_char_go').off('click').on('click', function () {
-        const name = $('#bp_char_typed').val();
-        if (name && name.trim()) {
-            // Check if it matches a character card first
-            const card = findCharacterCard(name.trim());
-            if (card) {
-                startConversation(card.name, 'card', card.avatar);
-            } else {
-                startConversation(name.trim(), 'typed', null);
-            }
-            $('#bp_char_typed').val('');
-        }
-    });
-
-    // Typed name — enter key
-    $('#bp_char_typed').off('keydown').on('keydown', function (e) {
+    // Enter key on To input starts conversation
+    $('#bp_to').off('keydown').on('keydown', function (e) {
         if (e.key === 'Enter') {
             e.preventDefault();
-            $('#bp_char_go').trigger('click');
+            $('#bp_start_convo').trigger('click');
         }
     });
 
-    // Send message — button
+    // Send message
     $('#bp_send').off('click').on('click', function () {
-        const text = $('#bp_input').val();
-        sendPmMessage(text);
+        sendPmMessage($('#bp_input').val());
     });
 
-    // Send message — enter key (shift+enter for newline)
+    // Enter to send (shift+enter for newline)
     $('#bp_input').off('keydown').on('keydown', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            const text = $(this).val();
-            sendPmMessage(text);
+            sendPmMessage($(this).val());
         }
     });
 
-    // Draft auto-save on input
+    // Draft auto-save
     $('#bp_input').off('input').on('input', saveDraftDebounced);
 
     // Per-conversation toggles
-    $('#bp_toggle_sees_chat').off('change').on('change', function () {
+    $('#bp_toggle_sees_world').off('change').on('change', function () {
         const convo = getActiveConversation();
         if (convo) {
-            convo.pmSeesMainChat = $(this).prop('checked');
+            convo.pmSeesWorld = $(this).prop('checked');
             saveSettingsDebounced();
-            debug(`${convo.characterName}: pmSeesMainChat = ${convo.pmSeesMainChat}`);
+            debug(`pmSeesWorld = ${convo.pmSeesWorld}`);
         }
     });
 
-    $('#bp_toggle_chat_sees').off('change').on('change', function () {
+    $('#bp_toggle_story_sees').off('change').on('change', function () {
         const convo = getActiveConversation();
         if (convo) {
-            convo.mainChatSeesPm = $(this).prop('checked');
+            convo.storySeesPm = $(this).prop('checked');
             saveSettingsDebounced();
-            debug(`${convo.characterName}: mainChatSeesPm = ${convo.mainChatSeesPm}`);
-
-            // If turning off, clear the injection immediately
-            if (!convo.mainChatSeesPm) {
+            debug(`storySeesPm = ${convo.storySeesPm}`);
+            if (!convo.storySeesPm) {
                 const key = getActiveKey();
                 setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
             }
@@ -687,37 +787,54 @@ function bindChatPanelEvents() {
     });
 
     // Clear conversation
-    $('#bpClearChat').off('click').on('click', function () {
+    $('#bpClearChat').off('click').on('click', function (e) {
+        e.stopPropagation(); // Don't toggle the inline-drawer
         const convo = getActiveConversation();
         if (!convo) return;
-        if (!confirm(`Clear all messages with ${convo.characterName}?`)) return;
+        if (!confirm(`Clear all messages in this conversation?`)) return;
         convo.messages = [];
         saveSettingsDebounced();
         renderConversation();
         setStatus('Conversation cleared');
     });
 
+    // Prompt viewer toggle
+    $('#bpViewPrompt').off('click').on('click', function (e) {
+        e.stopPropagation();
+        const $viewer = $('#bp_prompt_viewer');
+        if ($viewer.is(':visible')) {
+            $viewer.hide();
+        } else {
+            updatePromptViewer();
+            $viewer.show();
+        }
+    });
+
+    $('#bpClosePrompt').off('click').on('click', function () {
+        $('#bp_prompt_viewer').hide();
+    });
+
     // Conversation list — click to switch
-    $(document).off('click', '.bp-convo-item').on('click', '.bp-convo-item', function (e) {
+    $(document).off('click.bp_convo', '.bp-convo-item').on('click.bp_convo', '.bp-convo-item', function (e) {
         if ($(e.target).hasClass('bp-convo-delete')) return;
         const key = $(this).data('key');
-        if (key) switchToConversation(key);
+        if (key) switchToConversation(String(key));
     });
 
     // Conversation list — delete
-    $(document).off('click', '.bp-convo-delete').on('click', '.bp-convo-delete', function (e) {
+    $(document).off('click.bp_del', '.bp-convo-delete').on('click.bp_del', '.bp-convo-delete', function (e) {
         e.stopPropagation();
         const key = $(this).data('key');
         const conversations = getConversations();
         const convo = conversations[key];
-        if (convo && confirm(`Delete conversation with ${convo.characterName}?`)) {
-            deleteConversation(key);
+        if (convo && confirm(`Delete conversation ${convo.from.name} → ${convo.to.name}?`)) {
+            deleteConversation(String(key));
         }
     });
 }
 
 // ==========================================================================
-// Top bar button
+// Top bar icon
 // ==========================================================================
 
 function addTopBarIcon() {
@@ -745,45 +862,48 @@ jQuery(async function () {
     if (!extension_settings[MODULE_NAME]) {
         extension_settings[MODULE_NAME] = { ...defaultSettings, conversations: {} };
     }
-    // Merge with defaults for any new fields
     extension_settings[MODULE_NAME] = Object.assign(
         {},
         defaultSettings,
         extension_settings[MODULE_NAME],
     );
 
-    // Render settings panel
+    // Render settings panel into extensions settings area
     const settingsHtml = await renderExtensionTemplateAsync(EXTENSION_PATH, 'settings');
     $('#extensions_settings2').append(settingsHtml);
 
-    // Render chat panel into movingDivs
+    // Render chat panel into right drawer, before the character list
     const chatPanelHtml = await renderExtensionTemplateAsync(EXTENSION_PATH, 'chat-panel');
-    $('#movingDivs').append(chatPanelHtml);
-
-    // Make panel draggable
-    dragElement($('#bpChatPanel'));
-    loadMovingUIState();
+    const $target = $('#rm_characters_block');
+    if ($target.length) {
+        $target.before(chatPanelHtml);
+    } else {
+        // Fallback: append to scrollable inner in right panel
+        $('#right-nav-panel .scrollableInner').prepend(chatPanelHtml);
+    }
 
     // Add top bar icon
     addTopBarIcon();
 
-    // Load settings UI and bind events
+    // Load settings and bind events
     loadSettingsUI();
     bindSettingsEvents();
     bindChatPanelEvents();
+    applyBubbleColors();
 
-    // Listen for character list changes
+    // Populate datalists when characters change
     eventSource.on(event_types.CHAT_CHANGED, () => {
-        populateCharacterDropdown();
+        populateDatalists();
     });
 
-    // Initial character dropdown population
-    populateCharacterDropdown();
+    // Initial population
+    populateDatalists();
 
-    // Restore panel state
-    if (getSettings().panelOpen) {
-        openPanel();
+    // Restore active conversation if any
+    const activeKey = getActiveKey();
+    if (activeKey && getConversations()[activeKey]) {
+        switchToConversation(activeKey);
     }
 
-    console.log('[BurnerPhone] Extension loaded');
+    console.log('[BurnerPhone] Extension loaded (v0.2)');
 });
