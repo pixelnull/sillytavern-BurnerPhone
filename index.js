@@ -192,7 +192,27 @@ function getActiveConversation() {
     const settings = getSettings();
     if (!settings.activeConversation) return null;
     const conversations = getConversations();
-    return conversations[settings.activeConversation] || null;
+    const convo = conversations[settings.activeConversation] || null;
+    if (convo) migrateConversation(convo, settings.activeConversation);
+    return convo;
+}
+
+/**
+ * Ensure a conversation object has from/to identity objects.
+ * Handles data from older versions that may have stored them differently.
+ */
+function migrateConversation(convo, key) {
+    if (convo.from && convo.to) return; // Already valid
+    // Reconstruct from the key (format: "fromname::toname")
+    const parts = key.split('::');
+    if (!convo.from) {
+        convo.from = { name: parts[0] || 'Unknown', type: 'typed', avatar: null };
+    }
+    if (!convo.to) {
+        convo.to = { name: parts[1] || 'Unknown', type: 'typed', avatar: null };
+    }
+    console.log('[BurnerPhone] Migrated conversation data for key:', key);
+    saveSettingsDebounced();
 }
 
 function getActiveKey() {
@@ -291,6 +311,7 @@ async function sendPmMessage(text) {
         setStatus('No active conversation — start one first');
         return;
     }
+    console.log('[BurnerPhone] Active convo:', JSON.stringify({ from: convo.from, to: convo.to, msgs: convo.messages?.length }));
 
     const trimmed = text.trim();
 
@@ -471,6 +492,7 @@ function renderConversationList() {
     $target.show();
     for (const key of keys) {
         const convo = conversations[key];
+        migrateConversation(convo, key);
         const isActive = key === activeKey;
         const label = `${convo.from.name} → ${convo.to.name}`;
         const $item = $(`
