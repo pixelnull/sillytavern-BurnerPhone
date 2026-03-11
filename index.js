@@ -455,6 +455,7 @@ async function sendPmMessage(text) {
         setSendEnabled(false);
 
         const convoContextMode = convo.pmContextMode || 'isolated';
+        const settings = getSettings();
         let loreContext = '';
         if (convoContextMode !== 'isolated') {
             loreContext = await fetchDeepLoreEntries(convo, settings.pmScanDepth);
@@ -516,7 +517,9 @@ function formatPmForInjection(conversation, maxMessages) {
         return `${sender}: ${msg.content}`;
     });
 
-    return `<private_messages from="${fromName}" to="${toName}">\n[Private message exchange between ${fromName} and ${toName}, happening outside the main story:]\n${lines.join('\n')}\n</private_messages>`;
+    const safeFrom = fromName.replace(/"/g, '&quot;');
+    const safeTo = toName.replace(/"/g, '&quot;');
+    return `<private_messages from="${safeFrom}" to="${safeTo}">\n[Private message exchange between ${fromName} and ${toName}, happening outside the main story:]\n${lines.join('\n')}\n</private_messages>`;
 }
 
 function onGenerate(chatMessages, contextSize, abort, type) {
@@ -613,7 +616,9 @@ function renderConversation() {
         $mes.find('.timestamp').text(timeStr);
 
         // Avatar
-        const avatarUrl = isFrom ? getUserAvatarUrl() : getCharAvatarUrl(convo.to.name);
+        const avatarUrl = isFrom
+            ? (convo.from.type === 'user' ? getUserAvatarUrl() : getCharAvatarUrl(convo.from.name))
+            : getCharAvatarUrl(convo.to.name);
         $mes.find('.avatar img').attr('src', avatarUrl);
 
         // Strip leftover name prefix from old messages on display
@@ -933,6 +938,10 @@ function deleteConversation(key) {
 // ==========================================================================
 
 function saveDraftImmediate() {
+    if (saveDraftTimeout) {
+        clearTimeout(saveDraftTimeout);
+        saveDraftTimeout = null;
+    }
     const convo = getActiveConversation();
     if (!convo) return;
     convo.draftText = $('#bp_input').val() || '';
