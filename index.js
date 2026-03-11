@@ -1225,10 +1225,10 @@ function createDrawerPanel(chatPanelHtml) {
     const $drawer = $(`
         <div id="burnerphone-drawer" class="drawer">
             <div class="drawer-toggle drawer-header">
-                <div id="burnerphoneIcon" class="drawer-icon fa-solid fa-mobile-screen-button fa-fw closedIcon"
+                <div id="burnerphoneIcon" class="drawer-icon fa-solid fa-mobile-screen-button fa-fw closedIcon drawerPinnedOpen"
                      title="BurnerPhone"></div>
             </div>
-            <div id="burnerphone-panel" class="drawer-content closedDrawer fillRight">
+            <div id="burnerphone-panel" class="drawer-content closedDrawer fillRight pinnedOpen">
                 <div id="burnerphone-panelheader" class="fa-solid fa-grip drag-grabber"></div>
                 <div class="scrollableInner bp-panel-inner">
                 </div>
