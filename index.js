@@ -9,6 +9,9 @@ import {
     name1,
     this_chid,
     doNavbarIconClick,
+    messageFormatting,
+    user_avatar,
+    default_avatar,
 } from '../../../../script.js';
 import {
     extension_settings,
@@ -17,6 +20,7 @@ import {
 import { eventSource, event_types } from '../../../events.js';
 import { is_group_generating, selected_group } from '../../../group-chats.js';
 import { executeSlashCommandsWithOptions } from '../../../slash-commands.js';
+import { Popup, POPUP_TYPE } from '../../../popup.js';
 
 // ==========================================================================
 // Constants
@@ -62,6 +66,77 @@ let isGenerating = false;
 let saveDraftTimeout = null;
 let lastSentPrompt = '';
 let lastFullContext = null;
+
+// ==========================================================================
+// Helpers
+// ==========================================================================
+
+function stripNamePrefix(response, name) {
+    if (!response || !name) return response;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return response.replace(new RegExp(`^${escaped}\\s*:\\s*`, 'i'), '');
+}
+
+function getUserAvatarUrl() {
+    return user_avatar ? `/User Avatars/${user_avatar}` : '/img/user-default.png';
+}
+
+function getCharAvatarUrl(charName) {
+    const char = characters.find(c => c.name === charName);
+    return char?.avatar ? `/characters/${char.avatar}` : default_avatar;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatFullContext(ctx) {
+    if (!ctx) return '(no context captured yet — send a message first)';
+    if (typeof ctx === 'string') return ctx;
+    if (Array.isArray(ctx)) {
+        return ctx.map(msg => {
+            const role = (msg.role || 'unknown').toUpperCase();
+            const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2);
+            return `--- ${role} ---\n${content}`;
+        }).join('\n\n');
+    }
+    return JSON.stringify(ctx, null, 2);
+}
+
+function showPromptPopup() {
+    const contextText = formatFullContext(lastFullContext);
+    let html = '<div style="text-align:left;">';
+    html += '<h3>BurnerPhone Prompt</h3>';
+    html += '<div style="display:flex;justify-content:flex-end;margin-bottom:4px;">';
+    html += '<div class="menu_button" id="bp_copy_prompt">Copy</div></div>';
+    html += `<pre class="bp-prompt-text">${escapeHtml(lastSentPrompt || '(no prompt sent yet)')}</pre>`;
+    html += '<h3>Full Context Sent to API</h3>';
+    html += '<div style="display:flex;justify-content:flex-end;margin-bottom:4px;">';
+    html += '<div class="menu_button" id="bp_copy_context">Copy</div></div>';
+    html += `<pre class="bp-prompt-text">${escapeHtml(contextText)}</pre>`;
+    html += '</div>';
+
+    const popup = new Popup(html, POPUP_TYPE.TEXT, null, {
+        large: true,
+        allowVerticalScrolling: true,
+    });
+    popup.show();
+
+    $('#bp_copy_prompt').on('click', () => {
+        navigator.clipboard.writeText(lastSentPrompt || '');
+        toastr.info('Copied BurnerPhone prompt');
+    });
+    $('#bp_copy_context').on('click', () => {
+        navigator.clipboard.writeText(contextText);
+        toastr.info('Copied full context');
+    });
+}
+
+function getBpIndex(el) {
+    return parseInt($(el).closest('.bp-mes').attr('data-bp-idx'));
+}
 
 // ==========================================================================
 // Settings helpers
@@ -349,7 +424,6 @@ async function sendPmMessage(text) {
 
         const prompt = buildPromptFromTemplate(convo);
         lastSentPrompt = prompt;
-        updatePromptViewer();
         debug('Built prompt, length:', prompt.length);
 
         eventSource.once(event_types.GENERATE_AFTER_DATA, contextHandler);
@@ -363,15 +437,15 @@ async function sendPmMessage(text) {
         debug('Got response, length:', response ? response.length : 'null/empty');
 
         if (response && response.trim()) {
+            const cleaned = stripNamePrefix(response.trim(), convo.to.name);
             convo.messages.push({
                 sender: 'to',
-                content: response.trim(),
+                content: cleaned,
                 timestamp: Date.now(),
             });
             saveSettingsDebounced();
             renderConversation();
             scrollChatToBottom();
-            updatePromptViewer();
             setStatus('');
         } else {
             setStatus('Empty response received');
@@ -482,48 +556,60 @@ function renderConversation() {
 
     convo.messages.forEach((msg, index) => {
         const isFrom = msg.sender === 'from';
-        const bubbleClass = isFrom ? 'bp-message-from' : 'bp-message-to';
         const senderName = isFrom ? convo.from.name : convo.to.name;
         const displayContent = getDisplayContent(msg);
         const timeStr = msg.timestamp
             ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : '';
 
-        const $bubble = $('<div class="bp-message"></div>')
-            .addClass(bubbleClass)
-            .attr('data-index', index);
-        $bubble.append($('<div class="bp-message-sender"></div>').text(senderName));
-        $bubble.append($('<div class="bp-message-text"></div>').text(displayContent));
-        $bubble.append($('<div class="bp-message-timestamp"></div>').text(timeStr));
+        // Clone ST's message template
+        const $mes = $('#message_template .mes').clone();
+        $mes.addClass('bp-mes');
+        $mes.attr('data-bp-idx', index);
+        $mes.removeAttr('mesid');
+        $mes.attr('is_user', isFrom);
+        $mes.attr('is_system', false);
+        $mes.attr('ch_name', senderName);
 
-        // Action buttons
-        const $actions = $('<div class="bp-message-actions"></div>');
-        $actions.append($('<i class="fa-solid fa-copy bp-action" title="Copy"></i>').attr('data-action', 'copy'));
-        $actions.append($('<i class="fa-solid fa-pencil bp-action" title="Edit"></i>').attr('data-action', 'edit'));
-        $actions.append($('<i class="fa-solid fa-volume-high bp-action" title="TTS"></i>').attr('data-action', 'tts'));
-        $actions.append($('<i class="fa-solid fa-trash-can bp-action" title="Delete"></i>').attr('data-action', 'delete'));
-        // Regenerate only on last message if it's a "to" message
-        const isLastMessage = index === convo.messages.length - 1;
-        if (!isFrom && isLastMessage) {
-            $actions.append($('<i class="fa-solid fa-arrows-rotate bp-action" title="Regenerate"></i>').attr('data-action', 'regenerate'));
+        // Name + timestamp
+        $mes.find('.name_text').text(senderName);
+        $mes.find('.timestamp').text(timeStr);
+
+        // Avatar
+        const avatarUrl = isFrom ? getUserAvatarUrl() : getCharAvatarUrl(convo.to.name);
+        $mes.find('.avatar img').attr('src', avatarUrl);
+
+        // Message text — rich formatting via ST's messageFormatting
+        const formattedHtml = messageFormatting(displayContent, senderName, false, isFrom, -1);
+        $mes.find('.mes_text').html(formattedHtml);
+
+        // Hide irrelevant ST buttons
+        $mes.find('.mes_translate, .sd_message_gen, .mes_create_bookmark, .mes_create_branch, .mes_embed, .mes_hide, .mes_unhide, .mes_media_gallery, .mes_media_list, .mes_bookmark').hide();
+        $mes.find('.mesIDDisplay, .mes_timer, .tokenCounterDisplay, .mes_ghost, .mes_bias, .for_checkbox, .del_checkbox, .mes_reasoning_details, .mes_media_wrapper, .mes_file_wrapper').hide();
+
+        // Show prompt button if we have data
+        if (lastFullContext || lastSentPrompt) {
+            $mes.find('.mes_prompt').show();
         }
-        $bubble.append($actions);
 
-        // Swipe controls for "to" messages with multiple swipes
+        // Add regenerate button for last AI message
+        if (!isFrom && index === convo.messages.length - 1) {
+            $mes.find('.extraMesButtons').append(
+                '<div title="Regenerate" class="mes_button bp-regenerate fa-solid fa-arrows-rotate"></div>',
+            );
+        }
+
+        // Swipes — use ST template's built-in elements
         if (!isFrom && msg.swipes && msg.swipes.length > 1) {
             const swipeId = msg.swipe_id || 0;
-            const $swipes = $('<div class="bp-swipe-controls"></div>');
-            $swipes.append($('<i class="fa-solid fa-chevron-left bp-swipe-arrow"></i>')
-                .attr('data-action', 'swipe-left')
-                .toggleClass('disabled', swipeId === 0));
-            $swipes.append($('<span class="bp-swipe-counter"></span>').text(`${swipeId + 1}/${msg.swipes.length}`));
-            $swipes.append($('<i class="fa-solid fa-chevron-right bp-swipe-arrow"></i>')
-                .attr('data-action', 'swipe-right')
-                .toggleClass('disabled', swipeId === msg.swipes.length - 1));
-            $bubble.append($swipes);
+            $mes.find('.swipe_left').show().toggleClass('disabled', swipeId === 0);
+            $mes.find('.swipe_right').show().toggleClass('disabled', swipeId === msg.swipes.length - 1);
+            $mes.find('.swipes-counter').text(`${swipeId + 1}/${msg.swipes.length}`).show();
+        } else {
+            $mes.find('.swipe_left, .swipe_right, .swipes-counter').hide();
         }
 
-        $messages.append($bubble);
+        $messages.append($mes);
     });
 }
 
@@ -559,22 +645,6 @@ function renderConversationList() {
 // Message actions
 // ==========================================================================
 
-function handleMessageAction(action, index) {
-    const convo = getActiveConversation();
-    if (!convo || index < 0 || index >= convo.messages.length) return;
-    const msg = convo.messages[index];
-
-    switch (action) {
-        case 'copy': handleCopy(msg); break;
-        case 'edit': handleEditStart(index, msg); break;
-        case 'delete': handleDelete(convo, index); break;
-        case 'regenerate': handleRegenerate(convo, index); break;
-        case 'tts': handleTts(convo, msg); break;
-        case 'swipe-left': handleSwipe(convo, index, -1); break;
-        case 'swipe-right': handleSwipe(convo, index, 1); break;
-    }
-}
-
 function handleCopy(msg) {
     const text = getDisplayContent(msg);
     navigator.clipboard.writeText(text).then(() => {
@@ -586,23 +656,17 @@ function handleCopy(msg) {
 }
 
 function handleEditStart(index, msg) {
-    const $bubble = $(`.bp-message[data-index="${index}"]`);
-    const $textEl = $bubble.find('.bp-message-text');
+    const $mes = $(`.bp-mes[data-bp-idx="${index}"]`);
+    const $textEl = $mes.find('.mes_text');
     const currentText = getDisplayContent(msg);
 
-    // Replace text with textarea
-    $textEl.empty();
-    const $textarea = $('<textarea class="bp-edit-textarea text_pole"></textarea>').val(currentText);
-    $textEl.append($textarea);
+    // Replace formatted text with textarea
+    $textEl.html(`<textarea class="bp-edit-textarea text_pole">${escapeHtml(currentText)}</textarea>`);
 
-    // Add save/cancel buttons
-    const $buttons = $('<div class="bp-edit-buttons"></div>');
-    $buttons.append($('<div class="menu_button bp-edit-save" title="Save"><i class="fa-solid fa-check"></i></div>').attr('data-index', index));
-    $buttons.append($('<div class="menu_button bp-edit-cancel" title="Cancel"><i class="fa-solid fa-xmark"></i></div>'));
-    $textEl.after($buttons);
-
-    $bubble.addClass('bp-message-editing');
-    $textarea.focus();
+    // Show ST's edit buttons, hide normal buttons
+    $mes.find('.mes_buttons').hide();
+    $mes.find('.mes_edit_buttons').show();
+    $mes.find('.bp-edit-textarea').focus();
 }
 
 function handleEditSave(index) {
@@ -610,8 +674,8 @@ function handleEditSave(index) {
     if (!convo || index < 0 || index >= convo.messages.length) return;
     const msg = convo.messages[index];
 
-    const $bubble = $(`.bp-message[data-index="${index}"]`);
-    const newText = $bubble.find('.bp-edit-textarea').val();
+    const $mes = $(`.bp-mes[data-bp-idx="${index}"]`);
+    const newText = $mes.find('.bp-edit-textarea').val();
 
     if (newText !== undefined && newText.trim()) {
         msg.content = newText.trim();
@@ -676,14 +740,14 @@ async function handleRegenerate(convo, index) {
         });
 
         if (response && response.trim()) {
-            msg.swipes.push(response.trim());
+            const cleaned = stripNamePrefix(response.trim(), convo.to.name);
+            msg.swipes.push(cleaned);
             msg.swipe_id = msg.swipes.length - 1;
-            msg.content = response.trim();
+            msg.content = cleaned;
             msg.timestamp = Date.now();
             saveSettingsDebounced();
             renderConversation();
             scrollChatToBottom();
-            updatePromptViewer();
             setStatus('');
         } else {
             setStatus('Empty response received');
@@ -737,43 +801,23 @@ function setSendEnabled(enabled) {
     $('#bp_send').toggleClass('disabled', !enabled);
 }
 
-function updatePromptViewer() {
-    $('#bp_prompt_text').text(lastSentPrompt || '(no prompt sent yet)');
-
-    const $fullContext = $('#bp_full_context_text');
-    if (!lastFullContext) {
-        $fullContext.text('(no context captured yet — send a message first)');
-    } else if (typeof lastFullContext === 'string') {
-        $fullContext.text(lastFullContext);
-    } else if (Array.isArray(lastFullContext)) {
-        // OpenAI-style message array
-        const formatted = lastFullContext.map(msg => {
-            const role = (msg.role || 'unknown').toUpperCase();
-            const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2);
-            return `--- ${role} ---\n${content}`;
-        }).join('\n\n');
-        $fullContext.text(formatted);
-    } else {
-        $fullContext.text(JSON.stringify(lastFullContext, null, 2));
-    }
-}
-
 // ==========================================================================
 // Bubble colors
 // ==========================================================================
 
 function applyBubbleColors() {
     const settings = getSettings();
-    const $panel = $('#burnerphone-panel');
+    const panel = document.getElementById('burnerphone-panel');
+    if (!panel) return;
     if (settings.userBubbleColor) {
-        $panel.css('--bp-from-bubble', settings.userBubbleColor);
+        panel.style.setProperty('--bp-from-bubble', settings.userBubbleColor);
     } else {
-        $panel[0]?.style.removeProperty('--bp-from-bubble');
+        panel.style.removeProperty('--bp-from-bubble');
     }
     if (settings.charBubbleColor) {
-        $panel.css('--bp-to-bubble', settings.charBubbleColor);
+        panel.style.setProperty('--bp-to-bubble', settings.charBubbleColor);
     } else {
-        $panel[0]?.style.removeProperty('--bp-to-bubble');
+        panel.style.removeProperty('--bp-to-bubble');
     }
 }
 
@@ -1056,19 +1100,9 @@ function bindChatPanelEvents() {
         setStatus('Conversation cleared');
     });
 
-    // Prompt viewer toggle — delegated
+    // Prompt viewer — open ST Popup
     $(document).off('click.bp_viewprompt', '#bpViewPrompt').on('click.bp_viewprompt', '#bpViewPrompt', function () {
-        const $viewer = $('#bp_prompt_viewer');
-        if ($viewer.is(':visible')) {
-            $viewer.hide();
-        } else {
-            updatePromptViewer();
-            $viewer.show();
-        }
-    });
-
-    $(document).off('click.bp_closeprompt', '#bpClosePrompt').on('click.bp_closeprompt', '#bpClosePrompt', function () {
-        $('#bp_prompt_viewer').hide();
+        showPromptPopup();
     });
 
     // Conversation list — click to switch
@@ -1089,32 +1123,93 @@ function bindChatPanelEvents() {
         }
     });
 
-    // Message action buttons (copy, edit, delete, regenerate, tts)
-    $(document).off('click.bp_action', '.bp-action').on('click.bp_action', '.bp-action', function (e) {
+    // ---- ST-template message handlers (scoped to BP panel, stopPropagation) ----
+    const $panel = $('#burnerphone-panel');
+
+    // Catch-all: prevent any ST global handlers from firing on BP messages
+    $panel.on('click', '.bp-mes .mes_button', function (e) { e.stopPropagation(); });
+    $panel.on('click', '.bp-mes .swipe_left, .bp-mes .swipe_right', function (e) { e.stopPropagation(); });
+
+    // Copy
+    $panel.on('pointerup', '.bp-mes .mes_copy', function (e) {
         e.stopPropagation();
-        const action = $(this).data('action');
-        const index = parseInt($(this).closest('.bp-message').attr('data-index'));
-        if (!isNaN(index)) handleMessageAction(action, index);
+        const idx = getBpIndex(this);
+        const convo = getActiveConversation();
+        if (convo && !isNaN(idx)) handleCopy(convo.messages[idx]);
     });
 
-    // Swipe arrows
-    $(document).off('click.bp_swipe', '.bp-swipe-arrow').on('click.bp_swipe', '.bp-swipe-arrow', function (e) {
+    // Edit
+    $panel.on('click', '.bp-mes .mes_edit', function (e) {
         e.stopPropagation();
-        const action = $(this).data('action');
-        const index = parseInt($(this).closest('.bp-message').attr('data-index'));
-        if (!isNaN(index)) handleMessageAction(action, index);
+        const idx = getBpIndex(this);
+        const convo = getActiveConversation();
+        if (convo && !isNaN(idx)) handleEditStart(idx, convo.messages[idx]);
     });
 
-    // Edit save/cancel
-    $(document).off('click.bp_edit_save', '.bp-edit-save').on('click.bp_edit_save', '.bp-edit-save', function (e) {
+    // Edit confirm (ST's built-in edit done button)
+    $panel.on('click', '.bp-mes .mes_edit_done', function (e) {
         e.stopPropagation();
-        const index = parseInt($(this).data('index'));
-        if (!isNaN(index)) handleEditSave(index);
+        const idx = getBpIndex(this);
+        if (!isNaN(idx)) handleEditSave(idx);
     });
 
-    $(document).off('click.bp_edit_cancel', '.bp-edit-cancel').on('click.bp_edit_cancel', '.bp-edit-cancel', function (e) {
+    // Edit cancel
+    $panel.on('click', '.bp-mes .mes_edit_cancel', function (e) {
         e.stopPropagation();
         handleEditCancel();
+    });
+
+    // Delete (in edit mode)
+    $panel.on('click', '.bp-mes .mes_edit_delete', function (e) {
+        e.stopPropagation();
+        const idx = getBpIndex(this);
+        const convo = getActiveConversation();
+        if (convo && !isNaN(idx)) handleDelete(convo, idx);
+    });
+
+    // Narrate / TTS
+    $panel.on('click', '.bp-mes .mes_narrate', function (e) {
+        e.stopPropagation();
+        const idx = getBpIndex(this);
+        const convo = getActiveConversation();
+        if (convo && !isNaN(idx)) handleTts(convo, convo.messages[idx]);
+    });
+
+    // Prompt viewer
+    $panel.on('click', '.bp-mes .mes_prompt', function (e) {
+        e.stopPropagation();
+        showPromptPopup();
+    });
+
+    // Regenerate (custom BP button)
+    $panel.on('click', '.bp-mes .bp-regenerate', function (e) {
+        e.stopPropagation();
+        const idx = getBpIndex(this);
+        const convo = getActiveConversation();
+        if (convo && !isNaN(idx)) handleRegenerate(convo, idx);
+    });
+
+    // Swipe left
+    $panel.on('click', '.bp-mes .swipe_left', function (e) {
+        e.stopPropagation();
+        const idx = getBpIndex(this);
+        const convo = getActiveConversation();
+        if (convo && !isNaN(idx)) handleSwipe(convo, idx, -1);
+    });
+
+    // Swipe right
+    $panel.on('click', '.bp-mes .swipe_right', function (e) {
+        e.stopPropagation();
+        const idx = getBpIndex(this);
+        const convo = getActiveConversation();
+        if (convo && !isNaN(idx)) handleSwipe(convo, idx, 1);
+    });
+
+    // Extra buttons toggle (ST's ellipsis expand)
+    $panel.on('click', '.bp-mes .extraMesButtonsHint', function (e) {
+        e.stopPropagation();
+        const $extra = $(this).siblings('.extraMesButtons');
+        $extra.toggle();
     });
 }
 
@@ -1208,5 +1303,5 @@ jQuery(async function () {
         switchToConversation(activeKey);
     }
 
-    console.log('[BurnerPhone] Extension loaded (v0.4.0)');
+    console.log('[BurnerPhone] Extension loaded (v0.5.0)');
 });
