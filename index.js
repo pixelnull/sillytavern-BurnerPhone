@@ -32,17 +32,24 @@ const EXTENSION_PATH = 'third-party/sillytavern-BurnerPhone';
 const DEFAULT_PROMPT_TEMPLATE = `[Private Message Conversation]
 {{fromContext}}
 {{toContext}}
+{{loreContext}}
 {{storyContext}}
 [PM History between {{from}} and {{to}}]
 {{pmHistory}}
 
-You are {{to}}. {{from}} is messaging you privately. Respond as {{to}} in character. This is a private text message conversation.`;
+<think>This is a quick text message reply. Keep it brief and natural. Only write the words {{to}} sends — no narration, no emoting, no actions, no asterisks.</think>
+
+You are {{to}}. {{from}} is messaging you privately. Respond ONLY with {{to}}'s spoken/typed words. No narration, no actions, no emotes — just the text message reply. Keep it natural and concise like a real text conversation.
+
+Example — if {{from}} says "hey where are you?", respond like:
+"At the bar on 5th. Why, what's up?"`;
 
 const ISOLATION_FRAMING = `[This is an isolated private conversation. {{to}} has no knowledge of any ongoing story, roleplay, or events outside this PM exchange.]`;
+const LORE_ONLY_FRAMING = `[This PM conversation is separate from the main story. {{to}} has general world knowledge and lore but is not aware of current story events or the main chat.]`;
 
 const defaultSettings = {
     enabled: true,
-    pmSeesWorld: false,
+    pmContextMode: 'isolated',
     storySeesPm: false,
     pmScanDepth: 10,
     mainChatScanDepth: 10,
@@ -256,7 +263,7 @@ function getOrCreateConversation(from, to) {
             from: { ...from },
             to: { ...to },
             messages: [],
-            pmSeesWorld: settings.pmSeesWorld,
+            pmContextMode: settings.pmContextMode,
             storySeesPm: settings.storySeesPm,
             draftText: '',
         };
@@ -316,7 +323,27 @@ function getMainChatContext(depth) {
 // Prompt building
 // ==========================================================================
 
-function buildPromptFromTemplate(conversation) {
+async function fetchDeepLoreEntries(conversation, scanDepth) {
+    if (!globalThis.deepLoreEnhanced_matchText) return '';
+    const recent = scanDepth > 0 ? conversation.messages.slice(-scanDepth) : [];
+    if (recent.length === 0) return '';
+    const scanText = recent.map(msg => {
+        const sender = msg.sender === 'from' ? conversation.from.name : conversation.to.name;
+        return `${sender}: ${msg.content}`;
+    }).join('\n');
+    try {
+        const result = await globalThis.deepLoreEnhanced_matchText(scanText);
+        if (result.text) {
+            debug(`DeepLore matched ${result.count} entries (~${result.tokens} tokens)`);
+            return result.text;
+        }
+    } catch (err) {
+        console.error('[BurnerPhone] DeepLore matchText error:', err);
+    }
+    return '';
+}
+
+function buildPromptFromTemplate(conversation, loreContext = '') {
     const settings = getSettings();
     const template = settings.promptTemplate || DEFAULT_PROMPT_TEMPLATE;
     const fromName = conversation.from.name;
@@ -326,9 +353,10 @@ function buildPromptFromTemplate(conversation) {
     const fromContext = resolveCharacterContext(conversation.from);
     const toContext = resolveCharacterContext(conversation.to);
 
-    // Story context (only when pmSeesWorld is on)
+    // Story context (only in full mode)
     let storyContext = '';
-    if (conversation.pmSeesWorld) {
+    const contextMode = conversation.pmContextMode || 'isolated';
+    if (contextMode === 'full') {
         const mainChat = getMainChatContext(settings.mainChatScanDepth);
         if (mainChat) {
             storyContext = `[Recent Story Context — the main roleplay/story these characters are part of]\n${mainChat}`;
@@ -353,15 +381,19 @@ function buildPromptFromTemplate(conversation) {
         .replace(/\{\{user\}\}/g, () => name1 || 'User')
         .replace(/\{\{fromContext\}\}/g, () => fromContext)
         .replace(/\{\{toContext\}\}/g, () => toContext)
+        .replace(/\{\{loreContext\}\}/g, () => loreContext)
         .replace(/\{\{storyContext\}\}/g, () => storyContext)
         .replace(/\{\{pmHistory\}\}/g, () => pmHistory);
 
     // Clean up empty lines from missing sections
     prompt = prompt.replace(/\n{3,}/g, '\n\n').trim();
 
-    // Add isolation framing if PM doesn't see world
-    if (!conversation.pmSeesWorld) {
+    // Add context framing based on mode
+    if (contextMode === 'isolated') {
         const framing = ISOLATION_FRAMING.replace(/\{\{to\}\}/g, () => toName);
+        prompt = framing + '\n\n' + prompt;
+    } else if (contextMode === 'lore') {
+        const framing = LORE_ONLY_FRAMING.replace(/\{\{to\}\}/g, () => toName);
         prompt = framing + '\n\n' + prompt;
     }
 
@@ -422,7 +454,12 @@ async function sendPmMessage(text) {
         setStatus('Generating...', true);
         setSendEnabled(false);
 
-        const prompt = buildPromptFromTemplate(convo);
+        const convoContextMode = convo.pmContextMode || 'isolated';
+        let loreContext = '';
+        if (convoContextMode !== 'isolated') {
+            loreContext = await fetchDeepLoreEntries(convo, settings.pmScanDepth);
+        }
+        const prompt = buildPromptFromTemplate(convo, loreContext);
         lastSentPrompt = prompt;
         debug('Built prompt, length:', prompt.length);
 
@@ -430,7 +467,7 @@ async function sendPmMessage(text) {
 
         const response = await generateQuietPrompt({
             quietPrompt: prompt,
-            skipWIAN: !convo.pmSeesWorld,
+            skipWIAN: convoContextMode === 'isolated',
             quietName: convo.to.name,
         });
 
@@ -726,17 +763,22 @@ async function handleRegenerate(convo, index) {
     eventSource.once(event_types.GENERATE_AFTER_DATA, contextHandler);
 
     try {
+        const regenContextMode = convo.pmContextMode || 'isolated';
+        let loreContext = '';
+        if (regenContextMode !== 'isolated') {
+            loreContext = await fetchDeepLoreEntries(convo, getSettings().pmScanDepth);
+        }
         // Build prompt without the message being regenerated
         const originalMessages = convo.messages;
         convo.messages = originalMessages.slice(0, index);
-        const prompt = buildPromptFromTemplate(convo);
+        const prompt = buildPromptFromTemplate(convo, loreContext);
         convo.messages = originalMessages;
 
         lastSentPrompt = prompt;
 
         const response = await generateQuietPrompt({
             quietPrompt: prompt,
-            skipWIAN: !convo.pmSeesWorld,
+            skipWIAN: regenContextMode === 'isolated',
             quietName: convo.to.name,
         });
 
@@ -843,7 +885,7 @@ function switchToConversation(key) {
     $('#bp_active_char_label').text(`${convo.from.name} → ${convo.to.name}`);
 
     // Per-conversation toggles
-    $('#bp_toggle_sees_world').prop('checked', convo.pmSeesWorld);
+    $('#bp_toggle_context_mode').val(convo.pmContextMode || 'isolated');
     $('#bp_toggle_story_sees').prop('checked', convo.storySeesPm);
 
     // Restore draft
@@ -951,7 +993,7 @@ function populateDatalists() {
 function loadSettingsUI() {
     const settings = getSettings();
     $('#bp_enabled').prop('checked', settings.enabled);
-    $('#bp_default_pm_sees_world').prop('checked', settings.pmSeesWorld);
+    $('#bp_default_pm_context_mode').val(settings.pmContextMode);
     $('#bp_default_story_sees_pm').prop('checked', settings.storySeesPm);
     $('#bp_pm_scan_depth').val(settings.pmScanDepth);
     $('#bp_main_chat_scan_depth').val(settings.mainChatScanDepth);
@@ -979,7 +1021,7 @@ function bindSettingsEvents() {
     };
 
     bind('#bp_enabled', 'enabled', $el => $el.prop('checked'));
-    bind('#bp_default_pm_sees_world', 'pmSeesWorld', $el => $el.prop('checked'));
+    bind('#bp_default_pm_context_mode', 'pmContextMode', $el => $el.val());
     bind('#bp_default_story_sees_pm', 'storySeesPm', $el => $el.prop('checked'));
     bind('#bp_pm_scan_depth', 'pmScanDepth', $el => parseInt($el.val()) || 10);
     bind('#bp_main_chat_scan_depth', 'mainChatScanDepth', $el => parseInt($el.val()) || 10);
@@ -1068,12 +1110,12 @@ function bindChatPanelEvents() {
     $(document).off('input.bp_draft', '#bp_input').on('input.bp_draft', '#bp_input', saveDraftDebounced);
 
     // Per-conversation toggles — delegated
-    $(document).off('change.bp_world', '#bp_toggle_sees_world').on('change.bp_world', '#bp_toggle_sees_world', function () {
+    $(document).off('change.bp_context', '#bp_toggle_context_mode').on('change.bp_context', '#bp_toggle_context_mode', function () {
         const convo = getActiveConversation();
         if (convo) {
-            convo.pmSeesWorld = $(this).prop('checked');
+            convo.pmContextMode = $(this).val();
             saveSettingsDebounced();
-            debug(`pmSeesWorld = ${convo.pmSeesWorld}`);
+            debug(`pmContextMode = ${convo.pmContextMode}`);
         }
     });
 

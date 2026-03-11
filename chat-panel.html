@@ -37,11 +37,12 @@
             <span id="bp_active_to" class="bp-active-name"></span>
         </div>
         <div class="bp-toggles">
-            <label class="checkbox_label bp-toggle-label" for="bp_toggle_sees_world"
-                   title="PM character can see main chat history and all world lore">
-                <input id="bp_toggle_sees_world" type="checkbox">
-                <span>PM sees world</span>
-            </label>
+            <select id="bp_toggle_context_mode" class="text_pole bp-context-select"
+                    title="PM context awareness: what the PM character knows">
+                <option value="isolated">Isolated</option>
+                <option value="lore">Lore only</option>
+                <option value="full">Full</option>
+            </select>
             <label class="checkbox_label bp-toggle-label" for="bp_toggle_story_sees"
                    title="Main chat / story generation includes PM conversation (group: only target character)">
                 <input id="bp_toggle_story_sees" type="checkbox">

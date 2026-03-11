@@ -16,11 +16,13 @@
             <hr>
             <h4>Defaults for New Conversations</h4>
 
-            <div class="flex-container">
-                <label class="checkbox_label" for="bp_default_pm_sees_world">
-                    <input id="bp_default_pm_sees_world" type="checkbox">
-                    <span>PM sees world (character knows the story)</span>
-                </label>
+            <div class="flex-container flexFlowColumn">
+                <label for="bp_default_pm_context_mode">PM context awareness</label>
+                <select id="bp_default_pm_context_mode" class="text_pole wide100p">
+                    <option value="isolated">Isolated (no lore, no chat)</option>
+                    <option value="lore">Lore only (world info, no chat)</option>
+                    <option value="full">Full (lore + main chat)</option>
+                </select>
             </div>
             <div class="flex-container">
                 <label class="checkbox_label" for="bp_default_story_sees_pm">
@@ -97,8 +99,8 @@
             <hr>
             <h4>Prompt Template</h4>
             <small>Placeholders: <code>{{from}}</code>, <code>{{to}}</code>, <code>{{user}}</code>,
-                <code>{{fromContext}}</code>, <code>{{toContext}}</code>, <code>{{storyContext}}</code>,
-                <code>{{pmHistory}}</code></small>
+                <code>{{fromContext}}</code>, <code>{{toContext}}</code>, <code>{{loreContext}}</code>,
+                <code>{{storyContext}}</code>, <code>{{pmHistory}}</code></small>
             <textarea id="bp_prompt_template" class="text_pole wide100p" rows="12"></textarea>
             <div class="flex-container">
                 <div id="bp_reset_template" class="menu_button">

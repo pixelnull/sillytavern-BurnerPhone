@@ -159,6 +159,15 @@
     display: flex;
     gap: 12px;
     margin-top: 4px;
+    align-items: center;
+}
+
+.bp-context-select {
+    font-size: 0.8em !important;
+    padding: 2px 4px !important;
+    min-width: 0;
+    width: auto;
+    flex-shrink: 0;
 }
 
 .bp-toggle-label {
