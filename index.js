@@ -202,13 +202,13 @@ function getActiveConversation() {
  * Handles data from older versions that may have stored them differently.
  */
 function migrateConversation(convo, key) {
-    if (convo.from && convo.to) return; // Already valid
+    if (convo.from?.name && convo.to?.name) return; // Already valid
     // Reconstruct from the key (format: "fromname::toname")
     const parts = key.split('::');
-    if (!convo.from) {
+    if (!convo.from || !convo.from.name) {
         convo.from = { name: parts[0] || 'Unknown', type: 'typed', avatar: null };
     }
-    if (!convo.to) {
+    if (!convo.to || !convo.to.name) {
         convo.to = { name: parts[1] || 'Unknown', type: 'typed', avatar: null };
     }
     console.log('[BurnerPhone] Migrated conversation data for key:', key);
@@ -224,7 +224,7 @@ function getActiveKey() {
 // ==========================================================================
 
 function getMainChatContext(depth) {
-    if (!chat || !chat.length) return '';
+    if (!chat || !chat.length || !depth || depth <= 0) return '';
     const recent = chat.slice(-depth);
     const lines = [];
     for (const msg of recent) {
@@ -259,7 +259,7 @@ function buildPromptFromTemplate(conversation) {
     }
 
     // PM history
-    const recentMessages = conversation.messages.slice(-settings.pmScanDepth);
+    const recentMessages = settings.pmScanDepth > 0 ? conversation.messages.slice(-settings.pmScanDepth) : [];
     let pmHistory = '';
     if (recentMessages.length > 0) {
         const lines = recentMessages.map(msg => {
@@ -271,20 +271,20 @@ function buildPromptFromTemplate(conversation) {
 
     // Substitute placeholders
     let prompt = template
-        .replace(/\{\{from\}\}/g, fromName)
-        .replace(/\{\{to\}\}/g, toName)
-        .replace(/\{\{user\}\}/g, name1 || 'User')
-        .replace(/\{\{fromContext\}\}/g, fromContext)
-        .replace(/\{\{toContext\}\}/g, toContext)
-        .replace(/\{\{storyContext\}\}/g, storyContext)
-        .replace(/\{\{pmHistory\}\}/g, pmHistory);
+        .replace(/\{\{from\}\}/g, () => fromName)
+        .replace(/\{\{to\}\}/g, () => toName)
+        .replace(/\{\{user\}\}/g, () => name1 || 'User')
+        .replace(/\{\{fromContext\}\}/g, () => fromContext)
+        .replace(/\{\{toContext\}\}/g, () => toContext)
+        .replace(/\{\{storyContext\}\}/g, () => storyContext)
+        .replace(/\{\{pmHistory\}\}/g, () => pmHistory);
 
     // Clean up empty lines from missing sections
     prompt = prompt.replace(/\n{3,}/g, '\n\n').trim();
 
     // Add isolation framing if PM doesn't see world
     if (!conversation.pmSeesWorld) {
-        const framing = ISOLATION_FRAMING.replace(/\{\{to\}\}/g, toName);
+        const framing = ISOLATION_FRAMING.replace(/\{\{to\}\}/g, () => toName);
         prompt = framing + '\n\n' + prompt;
     }
 
@@ -297,6 +297,10 @@ function buildPromptFromTemplate(conversation) {
 
 async function sendPmMessage(text) {
     console.log('[BurnerPhone] sendPmMessage called, text:', text ? text.substring(0, 50) : '(empty)');
+    if (!getSettings().enabled) {
+        setStatus('BurnerPhone is disabled');
+        return;
+    }
     if (!text || !text.trim()) {
         setStatus('Type a message first');
         return;
@@ -383,6 +387,8 @@ async function sendPmMessage(text) {
 // ==========================================================================
 
 function formatPmForInjection(conversation, maxMessages) {
+    if (!conversation.from || !conversation.to) return '';
+    if (!maxMessages || maxMessages <= 0) return '';
     const recent = conversation.messages.slice(-maxMessages);
     if (recent.length === 0) return '';
 
@@ -406,9 +412,16 @@ function onGenerate(chatMessages, contextSize, abort, type) {
     const conversations = settings.conversations || {};
 
     for (const [key, convo] of Object.entries(conversations)) {
+        // Ensure conversation has valid identity objects
+        migrateConversation(convo, key);
+        if (!convo.from || !convo.to) {
+            setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
+            continue;
+        }
+
         if (!convo.storySeesPm || !convo.messages.length) {
             // Clear any stale injection
-            setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
+            setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
             continue;
         }
 
@@ -419,7 +432,7 @@ function onGenerate(chatMessages, contextSize, abort, type) {
                 const toIndex = characters.indexOf(toCard);
                 if (String(toIndex) !== String(this_chid)) {
                     // Not this character's turn — clear injection for this key
-                    setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
+                    setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
                     continue;
                 }
             }
@@ -465,14 +478,10 @@ function renderConversation() {
             ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : '';
 
-        const $bubble = $(`
-            <div class="bp-message ${bubbleClass}">
-                <div class="bp-message-sender">${senderName}</div>
-                <div class="bp-message-text"></div>
-                <div class="bp-message-timestamp">${timeStr}</div>
-            </div>
-        `);
-        $bubble.find('.bp-message-text').text(msg.content);
+        const $bubble = $('<div class="bp-message"></div>').addClass(bubbleClass);
+        $bubble.append($('<div class="bp-message-sender"></div>').text(senderName));
+        $bubble.append($('<div class="bp-message-text"></div>').text(msg.content));
+        $bubble.append($('<div class="bp-message-timestamp"></div>').text(timeStr));
         $messages.append($bubble);
     }
 }
@@ -495,12 +504,12 @@ function renderConversationList() {
         migrateConversation(convo, key);
         const isActive = key === activeKey;
         const label = `${convo.from.name} → ${convo.to.name}`;
-        const $item = $(`
-            <div class="bp-convo-item ${isActive ? 'active' : ''}" data-key="${key}">
-                <span>${label} (${convo.messages.length})</span>
-                <span class="bp-convo-delete fa-solid fa-xmark" data-key="${key}" title="Delete"></span>
-            </div>
-        `);
+        const $item = $('<div class="bp-convo-item"></div>')
+            .toggleClass('active', isActive)
+            .attr('data-key', key);
+        $item.append($('<span></span>').text(`${label} (${convo.messages.length})`));
+        $item.append($('<span class="bp-convo-delete fa-solid fa-xmark"></span>')
+            .attr('data-key', key).attr('title', 'Delete'));
         $target.append($item);
     }
 }
@@ -592,7 +601,7 @@ function deleteConversation(key) {
     delete conversations[key];
 
     // Clear injection
-    setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
+    setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
 
     if (getActiveKey() === key) {
         updateSetting('activeConversation', null);
@@ -651,10 +660,10 @@ function populateDatalists() {
         $dl.empty();
         // "Me" option for From
         if (id === 'bp_from_list') {
-            $dl.append(`<option value="Me (${name1 || 'User'})">`);
+            $dl.append($('<option>').attr('value', `Me (${name1 || 'User'})`));
         }
         for (const n of names) {
-            $dl.append(`<option value="${n}">`);
+            $dl.append($('<option>').attr('value', n));
         }
     }
 
@@ -722,10 +731,12 @@ function bindSettingsEvents() {
     });
     $('#bp_reset_user_color').off('click').on('click', function () {
         updateSetting('userBubbleColor', '');
+        $('#bp_user_bubble_color').val('#4a4a6a');
         applyBubbleColors();
     });
     $('#bp_reset_char_color').off('click').on('click', function () {
         updateSetting('charBubbleColor', '');
+        $('#bp_char_bubble_color').val('#3a5a3a');
         applyBubbleColors();
     });
 
@@ -804,7 +815,7 @@ function bindChatPanelEvents() {
             debug(`storySeesPm = ${convo.storySeesPm}`);
             if (!convo.storySeesPm) {
                 const key = getActiveKey();
-                setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.NONE, 0);
+                setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
             }
         }
     });
@@ -944,5 +955,5 @@ jQuery(async function () {
         switchToConversation(activeKey);
     }
 
-    console.log('[BurnerPhone] Extension loaded (v0.3)');
+    console.log('[BurnerPhone] Extension loaded (v0.3.1)');
 });
