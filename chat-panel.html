@@ -68,10 +68,17 @@
     <!-- Prompt Viewer -->
     <div id="bp_prompt_viewer" class="bp-prompt-viewer" style="display: none;">
         <div class="bp-prompt-viewer-header">
-            <small>Last Prompt Sent</small>
+            <small>Prompt Inspector</small>
             <div id="bpClosePrompt" class="fa-solid fa-xmark hoverglow bp-header-icon" title="Close"></div>
         </div>
-        <pre id="bp_prompt_text" class="bp-prompt-text"></pre>
+        <div class="bp-prompt-section">
+            <div class="bp-prompt-section-header">BurnerPhone Prompt</div>
+            <pre id="bp_prompt_text" class="bp-prompt-text"></pre>
+        </div>
+        <div class="bp-prompt-section">
+            <div class="bp-prompt-section-header">Full Context Sent to API</div>
+            <pre id="bp_full_context_text" class="bp-prompt-text"></pre>
+        </div>
     </div>
 
     <!-- Status -->

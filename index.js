@@ -16,6 +16,7 @@ import {
 } from '../../../extensions.js';
 import { eventSource, event_types } from '../../../events.js';
 import { is_group_generating, selected_group } from '../../../group-chats.js';
+import { executeSlashCommandsWithOptions } from '../../../slash-commands.js';
 
 // ==========================================================================
 // Constants
@@ -60,6 +61,7 @@ const defaultSettings = {
 let isGenerating = false;
 let saveDraftTimeout = null;
 let lastSentPrompt = '';
+let lastFullContext = null;
 
 // ==========================================================================
 // Settings helpers
@@ -331,24 +333,26 @@ async function sendPmMessage(text) {
     $('#bp_input').val('');
     saveSettingsDebounced();
 
+    // Capture full context for debugging
+    const contextHandler = (data) => {
+        lastFullContext = data.prompt || data;
+    };
+
     // Wrap everything in try/catch — errors before the old try block were silently dying
     try {
-        console.log('[BurnerPhone] Rendering from message...');
         renderConversation();
-        console.log('[BurnerPhone] Rendered OK. Scrolling...');
         scrollChatToBottom();
-        console.log('[BurnerPhone] Scroll OK. Setting generate state...');
 
         isGenerating = true;
         setStatus('Generating...', true);
         setSendEnabled(false);
 
-        console.log('[BurnerPhone] Building prompt...');
         const prompt = buildPromptFromTemplate(convo);
         lastSentPrompt = prompt;
         updatePromptViewer();
-        console.log('[BurnerPhone] Built prompt, length:', prompt.length);
-        console.log('[BurnerPhone] Calling generateQuietPrompt with skipWIAN:', !convo.pmSeesWorld, 'quietName:', convo.to.name);
+        debug('Built prompt, length:', prompt.length);
+
+        eventSource.once(event_types.GENERATE_AFTER_DATA, contextHandler);
 
         const response = await generateQuietPrompt({
             quietPrompt: prompt,
@@ -356,7 +360,7 @@ async function sendPmMessage(text) {
             quietName: convo.to.name,
         });
 
-        console.log('[BurnerPhone] Got response, length:', response ? response.length : 'null/empty');
+        debug('Got response, length:', response ? response.length : 'null/empty');
 
         if (response && response.trim()) {
             convo.messages.push({
@@ -367,6 +371,7 @@ async function sendPmMessage(text) {
             saveSettingsDebounced();
             renderConversation();
             scrollChatToBottom();
+            updatePromptViewer();
             setStatus('');
         } else {
             setStatus('Empty response received');
@@ -378,7 +383,8 @@ async function sendPmMessage(text) {
     } finally {
         isGenerating = false;
         setSendEnabled(true);
-        console.log('[BurnerPhone] Generation complete, isGenerating reset to false');
+        eventSource.removeListener(event_types.GENERATE_AFTER_DATA, contextHandler);
+        debug('Generation complete');
     }
 }
 
@@ -460,6 +466,10 @@ globalThis.burnerPhone_onGenerate = onGenerate;
 // UI rendering
 // ==========================================================================
 
+function getDisplayContent(msg) {
+    return (msg.swipes && msg.swipes.length > 0) ? msg.swipes[msg.swipe_id || 0] : msg.content;
+}
+
 function renderConversation() {
     const convo = getActiveConversation();
     const $messages = $('#bp_chat_messages');
@@ -470,20 +480,51 @@ function renderConversation() {
         return;
     }
 
-    for (const msg of convo.messages) {
+    convo.messages.forEach((msg, index) => {
         const isFrom = msg.sender === 'from';
         const bubbleClass = isFrom ? 'bp-message-from' : 'bp-message-to';
         const senderName = isFrom ? convo.from.name : convo.to.name;
+        const displayContent = getDisplayContent(msg);
         const timeStr = msg.timestamp
             ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : '';
 
-        const $bubble = $('<div class="bp-message"></div>').addClass(bubbleClass);
+        const $bubble = $('<div class="bp-message"></div>')
+            .addClass(bubbleClass)
+            .attr('data-index', index);
         $bubble.append($('<div class="bp-message-sender"></div>').text(senderName));
-        $bubble.append($('<div class="bp-message-text"></div>').text(msg.content));
+        $bubble.append($('<div class="bp-message-text"></div>').text(displayContent));
         $bubble.append($('<div class="bp-message-timestamp"></div>').text(timeStr));
+
+        // Action buttons
+        const $actions = $('<div class="bp-message-actions"></div>');
+        $actions.append($('<i class="fa-solid fa-copy bp-action" title="Copy"></i>').attr('data-action', 'copy'));
+        $actions.append($('<i class="fa-solid fa-pencil bp-action" title="Edit"></i>').attr('data-action', 'edit'));
+        $actions.append($('<i class="fa-solid fa-volume-high bp-action" title="TTS"></i>').attr('data-action', 'tts'));
+        $actions.append($('<i class="fa-solid fa-trash-can bp-action" title="Delete"></i>').attr('data-action', 'delete'));
+        // Regenerate only on last message if it's a "to" message
+        const isLastMessage = index === convo.messages.length - 1;
+        if (!isFrom && isLastMessage) {
+            $actions.append($('<i class="fa-solid fa-arrows-rotate bp-action" title="Regenerate"></i>').attr('data-action', 'regenerate'));
+        }
+        $bubble.append($actions);
+
+        // Swipe controls for "to" messages with multiple swipes
+        if (!isFrom && msg.swipes && msg.swipes.length > 1) {
+            const swipeId = msg.swipe_id || 0;
+            const $swipes = $('<div class="bp-swipe-controls"></div>');
+            $swipes.append($('<i class="fa-solid fa-chevron-left bp-swipe-arrow"></i>')
+                .attr('data-action', 'swipe-left')
+                .toggleClass('disabled', swipeId === 0));
+            $swipes.append($('<span class="bp-swipe-counter"></span>').text(`${swipeId + 1}/${msg.swipes.length}`));
+            $swipes.append($('<i class="fa-solid fa-chevron-right bp-swipe-arrow"></i>')
+                .attr('data-action', 'swipe-right')
+                .toggleClass('disabled', swipeId === msg.swipes.length - 1));
+            $bubble.append($swipes);
+        }
+
         $messages.append($bubble);
-    }
+    });
 }
 
 function renderConversationList() {
@@ -514,6 +555,173 @@ function renderConversationList() {
     }
 }
 
+// ==========================================================================
+// Message actions
+// ==========================================================================
+
+function handleMessageAction(action, index) {
+    const convo = getActiveConversation();
+    if (!convo || index < 0 || index >= convo.messages.length) return;
+    const msg = convo.messages[index];
+
+    switch (action) {
+        case 'copy': handleCopy(msg); break;
+        case 'edit': handleEditStart(index, msg); break;
+        case 'delete': handleDelete(convo, index); break;
+        case 'regenerate': handleRegenerate(convo, index); break;
+        case 'tts': handleTts(convo, msg); break;
+        case 'swipe-left': handleSwipe(convo, index, -1); break;
+        case 'swipe-right': handleSwipe(convo, index, 1); break;
+    }
+}
+
+function handleCopy(msg) {
+    const text = getDisplayContent(msg);
+    navigator.clipboard.writeText(text).then(() => {
+        setStatus('Copied to clipboard');
+        setTimeout(() => setStatus(''), 2000);
+    }).catch(() => {
+        setStatus('Failed to copy');
+    });
+}
+
+function handleEditStart(index, msg) {
+    const $bubble = $(`.bp-message[data-index="${index}"]`);
+    const $textEl = $bubble.find('.bp-message-text');
+    const currentText = getDisplayContent(msg);
+
+    // Replace text with textarea
+    $textEl.empty();
+    const $textarea = $('<textarea class="bp-edit-textarea text_pole"></textarea>').val(currentText);
+    $textEl.append($textarea);
+
+    // Add save/cancel buttons
+    const $buttons = $('<div class="bp-edit-buttons"></div>');
+    $buttons.append($('<div class="menu_button bp-edit-save" title="Save"><i class="fa-solid fa-check"></i></div>').attr('data-index', index));
+    $buttons.append($('<div class="menu_button bp-edit-cancel" title="Cancel"><i class="fa-solid fa-xmark"></i></div>'));
+    $textEl.after($buttons);
+
+    $bubble.addClass('bp-message-editing');
+    $textarea.focus();
+}
+
+function handleEditSave(index) {
+    const convo = getActiveConversation();
+    if (!convo || index < 0 || index >= convo.messages.length) return;
+    const msg = convo.messages[index];
+
+    const $bubble = $(`.bp-message[data-index="${index}"]`);
+    const newText = $bubble.find('.bp-edit-textarea').val();
+
+    if (newText !== undefined && newText.trim()) {
+        msg.content = newText.trim();
+        if (msg.swipes && msg.swipes.length > 0) {
+            msg.swipes[msg.swipe_id || 0] = msg.content;
+        }
+        saveSettingsDebounced();
+    }
+
+    renderConversation();
+}
+
+function handleEditCancel() {
+    renderConversation();
+}
+
+function handleDelete(convo, index) {
+    if (!confirm('Delete this message?')) return;
+    convo.messages.splice(index, 1);
+    saveSettingsDebounced();
+    renderConversation();
+}
+
+async function handleRegenerate(convo, index) {
+    if (isGenerating) {
+        setStatus('Already generating...');
+        return;
+    }
+
+    const msg = convo.messages[index];
+    if (msg.sender !== 'to') return;
+
+    // Initialize swipes if not present
+    if (!msg.swipes) {
+        msg.swipes = [msg.content];
+        msg.swipe_id = 0;
+    }
+
+    isGenerating = true;
+    setStatus('Regenerating...', true);
+    setSendEnabled(false);
+
+    // Capture full context
+    const contextHandler = (data) => {
+        lastFullContext = data.prompt || data;
+    };
+    eventSource.once(event_types.GENERATE_AFTER_DATA, contextHandler);
+
+    try {
+        // Build prompt without the message being regenerated
+        const originalMessages = convo.messages;
+        convo.messages = originalMessages.slice(0, index);
+        const prompt = buildPromptFromTemplate(convo);
+        convo.messages = originalMessages;
+
+        lastSentPrompt = prompt;
+
+        const response = await generateQuietPrompt({
+            quietPrompt: prompt,
+            skipWIAN: !convo.pmSeesWorld,
+            quietName: convo.to.name,
+        });
+
+        if (response && response.trim()) {
+            msg.swipes.push(response.trim());
+            msg.swipe_id = msg.swipes.length - 1;
+            msg.content = response.trim();
+            msg.timestamp = Date.now();
+            saveSettingsDebounced();
+            renderConversation();
+            scrollChatToBottom();
+            updatePromptViewer();
+            setStatus('');
+        } else {
+            setStatus('Empty response received');
+        }
+    } catch (err) {
+        console.error('[BurnerPhone] REGENERATE ERROR:', err);
+        setStatus(`Error: ${err?.message || 'Regeneration failed'}`);
+    } finally {
+        isGenerating = false;
+        setSendEnabled(true);
+        eventSource.removeListener(event_types.GENERATE_AFTER_DATA, contextHandler);
+    }
+}
+
+async function handleTts(convo, msg) {
+    const text = getDisplayContent(msg);
+    const voiceName = msg.sender === 'to' ? convo.to.name : convo.from.name;
+    try {
+        await executeSlashCommandsWithOptions(`/narrate voice="${voiceName}" ${text}`);
+    } catch (err) {
+        console.error('[BurnerPhone] TTS error:', err);
+        setStatus('TTS failed — is the TTS extension enabled?');
+    }
+}
+
+function handleSwipe(convo, index, direction) {
+    const msg = convo.messages[index];
+    if (!msg.swipes || msg.swipes.length <= 1) return;
+
+    const newId = (msg.swipe_id || 0) + direction;
+    if (newId < 0 || newId >= msg.swipes.length) return;
+
+    msg.swipe_id = newId;
+    msg.content = msg.swipes[newId];
+    saveSettingsDebounced();
+    renderConversation();
+}
+
 function scrollChatToBottom() {
     const area = document.getElementById('bp_chat_area');
     if (area) area.scrollTop = area.scrollHeight;
@@ -531,6 +739,23 @@ function setSendEnabled(enabled) {
 
 function updatePromptViewer() {
     $('#bp_prompt_text').text(lastSentPrompt || '(no prompt sent yet)');
+
+    const $fullContext = $('#bp_full_context_text');
+    if (!lastFullContext) {
+        $fullContext.text('(no context captured yet — send a message first)');
+    } else if (typeof lastFullContext === 'string') {
+        $fullContext.text(lastFullContext);
+    } else if (Array.isArray(lastFullContext)) {
+        // OpenAI-style message array
+        const formatted = lastFullContext.map(msg => {
+            const role = (msg.role || 'unknown').toUpperCase();
+            const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2);
+            return `--- ${role} ---\n${content}`;
+        }).join('\n\n');
+        $fullContext.text(formatted);
+    } else {
+        $fullContext.text(JSON.stringify(lastFullContext, null, 2));
+    }
 }
 
 // ==========================================================================
@@ -863,6 +1088,34 @@ function bindChatPanelEvents() {
             deleteConversation(String(key));
         }
     });
+
+    // Message action buttons (copy, edit, delete, regenerate, tts)
+    $(document).off('click.bp_action', '.bp-action').on('click.bp_action', '.bp-action', function (e) {
+        e.stopPropagation();
+        const action = $(this).data('action');
+        const index = parseInt($(this).closest('.bp-message').attr('data-index'));
+        if (!isNaN(index)) handleMessageAction(action, index);
+    });
+
+    // Swipe arrows
+    $(document).off('click.bp_swipe', '.bp-swipe-arrow').on('click.bp_swipe', '.bp-swipe-arrow', function (e) {
+        e.stopPropagation();
+        const action = $(this).data('action');
+        const index = parseInt($(this).closest('.bp-message').attr('data-index'));
+        if (!isNaN(index)) handleMessageAction(action, index);
+    });
+
+    // Edit save/cancel
+    $(document).off('click.bp_edit_save', '.bp-edit-save').on('click.bp_edit_save', '.bp-edit-save', function (e) {
+        e.stopPropagation();
+        const index = parseInt($(this).data('index'));
+        if (!isNaN(index)) handleEditSave(index);
+    });
+
+    $(document).off('click.bp_edit_cancel', '.bp-edit-cancel').on('click.bp_edit_cancel', '.bp-edit-cancel', function (e) {
+        e.stopPropagation();
+        handleEditCancel();
+    });
 }
 
 // ==========================================================================
@@ -955,5 +1208,5 @@ jQuery(async function () {
         switchToConversation(activeKey);
     }
 
-    console.log('[BurnerPhone] Extension loaded (v0.3.1)');
+    console.log('[BurnerPhone] Extension loaded (v0.4.0)');
 });
