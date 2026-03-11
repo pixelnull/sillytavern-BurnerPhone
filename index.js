@@ -579,18 +579,19 @@ function renderConversation() {
         const avatarUrl = isFrom ? getUserAvatarUrl() : getCharAvatarUrl(convo.to.name);
         $mes.find('.avatar img').attr('src', avatarUrl);
 
+        // Strip leftover name prefix from old messages on display
+        const cleanContent = !isFrom ? stripNamePrefix(displayContent, convo.to.name) : displayContent;
+
         // Message text — rich formatting via ST's messageFormatting
-        const formattedHtml = messageFormatting(displayContent, senderName, false, isFrom, -1);
+        const formattedHtml = messageFormatting(cleanContent, senderName, false, isFrom, -1);
         $mes.find('.mes_text').html(formattedHtml);
 
         // Hide irrelevant ST buttons
         $mes.find('.mes_translate, .sd_message_gen, .mes_create_bookmark, .mes_create_branch, .mes_embed, .mes_hide, .mes_unhide, .mes_media_gallery, .mes_media_list, .mes_bookmark').hide();
         $mes.find('.mesIDDisplay, .mes_timer, .tokenCounterDisplay, .mes_ghost, .mes_bias, .for_checkbox, .del_checkbox, .mes_reasoning_details, .mes_media_wrapper, .mes_file_wrapper').hide();
 
-        // Show prompt button if we have data
-        if (lastFullContext || lastSentPrompt) {
-            $mes.find('.mes_prompt').show();
-        }
+        // Always show prompt button (popup handles empty state)
+        $mes.find('.mes_prompt').show();
 
         // Add regenerate button for last AI message
         if (!isFrom && index === convo.messages.length - 1) {
