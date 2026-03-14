@@ -4,22 +4,29 @@
         <b>BurnerPhone</b>
         <span id="bp_active_char_label" class="bp-header-label"></span>
         <div class="bp-header-icons">
+            <div id="bpExport" class="fa-solid fa-download hoverglow bp-header-icon" title="Export conversation"></div>
+            <div id="bpImport" class="fa-solid fa-upload hoverglow bp-header-icon" title="Import conversation"></div>
+            <input id="bpImportFile" type="file" accept=".json" style="display:none;">
             <div id="bpViewPrompt" class="fa-solid fa-eye hoverglow bp-header-icon" title="View last prompt"></div>
             <div id="bpClearChat" class="fa-solid fa-trash-can hoverglow bp-header-icon" title="Clear conversation"></div>
         </div>
     </div>
 
-    <!-- From / To identity row -->
+    <!-- From / To identity row with picker dropdowns -->
     <div class="bp-identity-row">
         <div class="bp-identity-field">
             <label for="bp_from">From</label>
-            <input id="bp_from" list="bp_from_list" class="text_pole" placeholder="Me">
-            <datalist id="bp_from_list"></datalist>
+            <div class="bp-picker-wrapper">
+                <input id="bp_from" class="text_pole" placeholder="Me" autocomplete="off">
+                <div id="bp_from_dropdown" class="bp-picker-dropdown" style="display:none;"></div>
+            </div>
         </div>
         <div class="bp-identity-field">
             <label for="bp_to">To</label>
-            <input id="bp_to" list="bp_to_list" class="text_pole" placeholder="Character name...">
-            <datalist id="bp_to_list"></datalist>
+            <div class="bp-picker-wrapper">
+                <input id="bp_to" class="text_pole" placeholder="Character name..." autocomplete="off">
+                <div id="bp_to_dropdown" class="bp-picker-dropdown" style="display:none;"></div>
+            </div>
         </div>
         <div id="bp_start_convo" class="menu_button bp-start-btn" title="Start conversation">
             <i class="fa-solid fa-arrow-right"></i>
@@ -63,6 +70,9 @@
         <textarea id="bp_input" class="text_pole bp-input-text" placeholder="Type a message..." rows="2"></textarea>
         <div id="bp_send" class="menu_button bp-send-btn" title="Send (Enter)">
             <i class="fa-solid fa-paper-plane"></i>
+        </div>
+        <div id="bp_cancel" class="menu_button bp-cancel-btn" title="Cancel generation" style="display: none;">
+            <i class="fa-solid fa-xmark"></i>
         </div>
     </div>
 

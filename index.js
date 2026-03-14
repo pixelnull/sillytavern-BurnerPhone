@@ -60,6 +60,7 @@ const defaultSettings = {
     promptTemplate: DEFAULT_PROMPT_TEMPLATE,
     userBubbleColor: '',
     charBubbleColor: '',
+    showDateSeparators: true,
     conversations: {},
     activeConversation: null,
     debugMode: false,
@@ -70,9 +71,14 @@ const defaultSettings = {
 // ==========================================================================
 
 let isGenerating = false;
+let cancelRequested = false;
+let generationTimeout = null;
 let saveDraftTimeout = null;
 let lastSentPrompt = '';
 let lastFullContext = null;
+
+const GENERATION_TIMEOUT_MS = 120_000; // 2 minutes safety timeout
+const KEY_SEPARATOR = '\x1F'; // Unit separator — can't appear in names
 
 // ==========================================================================
 // Helpers
@@ -88,8 +94,12 @@ function getUserAvatarUrl() {
     return user_avatar ? `/User Avatars/${user_avatar}` : '/img/user-default.png';
 }
 
-function getCharAvatarUrl(charName) {
-    const char = characters.find(c => c.name === charName);
+function getCharAvatarUrl(nameOrIdentity) {
+    // Accept either a string name or an identity object {name, avatar}
+    const lookupKey = (typeof nameOrIdentity === 'object')
+        ? (nameOrIdentity.avatar || nameOrIdentity.name)
+        : nameOrIdentity;
+    const char = findCharacterCard(lookupKey);
     return char?.avatar ? `/characters/${char.avatar}` : default_avatar;
 }
 
@@ -251,7 +261,7 @@ function resolveCharacterContext(identity) {
 function getConversationKey(from, to) {
     const fromKey = (from.name || '').toLowerCase().trim();
     const toKey = (to.name || '').toLowerCase().trim();
-    return `${fromKey}::${toKey}`;
+    return `${fromKey}${KEY_SEPARATOR}${toKey}`;
 }
 
 function getOrCreateConversation(from, to) {
@@ -287,16 +297,49 @@ function getActiveConversation() {
  */
 function migrateConversation(convo, key) {
     if (convo.from?.name && convo.to?.name) return; // Already valid
-    // Reconstruct from the key (format: "fromname::toname")
-    const parts = key.split('::');
+    // Reconstruct from the key — handle both old '::' and new '\x1F' separators
+    const sep = key.includes(KEY_SEPARATOR) ? KEY_SEPARATOR : '::';
+    const sepIdx = key.indexOf(sep);
+    const fromName = sepIdx >= 0 ? key.substring(0, sepIdx) : key;
+    const toName = sepIdx >= 0 ? key.substring(sepIdx + sep.length) : 'Unknown';
     if (!convo.from || !convo.from.name) {
-        convo.from = { name: parts[0] || 'Unknown', type: 'typed', avatar: null };
+        convo.from = { name: fromName || 'Unknown', type: 'typed', avatar: null };
     }
     if (!convo.to || !convo.to.name) {
-        convo.to = { name: parts[1] || 'Unknown', type: 'typed', avatar: null };
+        convo.to = { name: toName || 'Unknown', type: 'typed', avatar: null };
     }
-    console.log('[BurnerPhone] Migrated conversation data for key:', key);
+    debug('Migrated conversation data for key:', key);
     saveSettingsDebounced();
+}
+
+/**
+ * Migrate old '::' conversation keys to '\x1F' separator.
+ * Also updates activeConversation if it used the old format.
+ */
+function migrateConversationKeys() {
+    const conversations = getConversations();
+    const settings = getSettings();
+    let changed = false;
+
+    for (const key of Object.keys(conversations)) {
+        if (key.includes('::') && !key.includes(KEY_SEPARATOR)) {
+            // Build new key from conversation's from/to (most reliable)
+            const convo = conversations[key];
+            migrateConversation(convo, key);
+            const newKey = getConversationKey(convo.from, convo.to);
+            if (newKey !== key) {
+                conversations[newKey] = convo;
+                delete conversations[key];
+                if (settings.activeConversation === key) {
+                    extension_settings[MODULE_NAME].activeConversation = newKey;
+                }
+                debug('Migrated key:', key, '→', newKey);
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) saveSettingsDebounced();
 }
 
 function getActiveKey() {
@@ -327,10 +370,16 @@ async function fetchDeepLoreEntries(conversation, scanDepth) {
     if (!globalThis.deepLoreEnhanced_matchText) return '';
     const recent = scanDepth > 0 ? conversation.messages.slice(-scanDepth) : [];
     if (recent.length === 0) return '';
-    const scanText = recent.map(msg => {
+
+    // Prepend character names so DeepLore matches entries keyed to them
+    // even if names aren't explicitly mentioned in recent messages
+    const namePreamble = `${conversation.from.name} ${conversation.to.name}`;
+    const messageLines = recent.map(msg => {
         const sender = msg.sender === 'from' ? conversation.from.name : conversation.to.name;
         return `${sender}: ${msg.content}`;
     }).join('\n');
+    const scanText = `${namePreamble}\n${messageLines}`;
+
     try {
         const result = await globalThis.deepLoreEnhanced_matchText(scanText);
         if (result.text) {
@@ -339,6 +388,7 @@ async function fetchDeepLoreEntries(conversation, scanDepth) {
         }
     } catch (err) {
         console.error('[BurnerPhone] DeepLore matchText error:', err);
+        toastr.warning('Lore context unavailable — DeepLore error', 'BurnerPhone', { timeOut: 4000 });
     }
     return '';
 }
@@ -401,11 +451,121 @@ function buildPromptFromTemplate(conversation, loreContext = '') {
 }
 
 // ==========================================================================
-// PM generation
+// PM generation (shared core)
+// ==========================================================================
+
+/**
+ * Shared generation core. Builds prompt from the given conversation+messages,
+ * calls generateQuietPrompt, and returns the cleaned response text (or null).
+ * Manages isGenerating, status, cancel, timeout, and context capture.
+ *
+ * @param {object} convo - The conversation object (not mutated)
+ * @param {Array} messagesForPrompt - Messages to include in prompt context
+ * @param {string} statusLabel - Status text shown during generation
+ * @returns {Promise<string|null>} Cleaned response text, or null if empty/cancelled
+ */
+async function generateResponse(convo, messagesForPrompt, statusLabel = 'Generating...') {
+    if (isGenerating) {
+        setStatus('Already generating...');
+        return null;
+    }
+
+    isGenerating = true;
+    cancelRequested = false;
+    setStatus(statusLabel, true);
+    setSendEnabled(false);
+    showCancelButton(true);
+
+    // Safety timeout — auto-reset if generation hangs
+    generationTimeout = setTimeout(() => {
+        if (isGenerating) {
+            console.error('[BurnerPhone] Generation timed out after', GENERATION_TIMEOUT_MS, 'ms');
+            resetGenerationState();
+            setStatus('Generation timed out');
+        }
+    }, GENERATION_TIMEOUT_MS);
+
+    const contextHandler = (data) => {
+        lastFullContext = data.prompt || data;
+    };
+    eventSource.once(event_types.GENERATE_AFTER_DATA, contextHandler);
+
+    try {
+        const contextMode = convo.pmContextMode || 'isolated';
+        const settings = getSettings();
+        let loreContext = '';
+        if (contextMode !== 'isolated') {
+            loreContext = await fetchDeepLoreEntries(convo, settings.pmScanDepth);
+        }
+
+        // Build prompt using a temporary convo with the specified messages (no mutation)
+        const tempConvo = { ...convo, messages: messagesForPrompt };
+        const prompt = buildPromptFromTemplate(tempConvo, loreContext);
+        lastSentPrompt = prompt;
+        debug('Built prompt, length:', prompt.length);
+
+        if (cancelRequested) {
+            setStatus('Generation cancelled');
+            return null;
+        }
+
+        const response = await generateQuietPrompt({
+            quietPrompt: prompt,
+            skipWIAN: contextMode === 'isolated',
+            quietName: convo.to.name,
+        });
+
+        if (cancelRequested) {
+            setStatus('Generation cancelled');
+            return null;
+        }
+
+        debug('Got response, length:', response ? response.length : 'null/empty');
+
+        if (response && response.trim()) {
+            return stripNamePrefix(response.trim(), convo.to.name);
+        } else {
+            setStatus('Empty response received');
+            return null;
+        }
+    } catch (err) {
+        console.error('[BurnerPhone] GENERATION ERROR:', err);
+        setStatus(`Error: ${err?.message || 'Generation failed'}`);
+        return null;
+    } finally {
+        clearTimeout(generationTimeout);
+        generationTimeout = null;
+        resetGenerationState();
+        eventSource.removeListener(event_types.GENERATE_AFTER_DATA, contextHandler);
+        debug('Generation complete');
+    }
+}
+
+function resetGenerationState() {
+    isGenerating = false;
+    cancelRequested = false;
+    setSendEnabled(true);
+    showCancelButton(false);
+}
+
+function cancelGeneration() {
+    if (isGenerating) {
+        cancelRequested = true;
+        setStatus('Cancelling...');
+    }
+}
+
+function showCancelButton(show) {
+    $('#bp_send').toggle(!show);
+    $('#bp_cancel').toggle(show);
+}
+
+// ==========================================================================
+// PM generation (send + regenerate)
 // ==========================================================================
 
 async function sendPmMessage(text) {
-    console.log('[BurnerPhone] sendPmMessage called, text:', text ? text.substring(0, 50) : '(empty)');
+    debug('sendPmMessage called, text:', text ? text.substring(0, 50) : '(empty)');
     if (!getSettings().enabled) {
         setStatus('BurnerPhone is disabled');
         return;
@@ -414,89 +574,82 @@ async function sendPmMessage(text) {
         setStatus('Type a message first');
         return;
     }
-    if (isGenerating) {
-        setStatus('Already generating...');
-        return;
-    }
 
     const convo = getActiveConversation();
     if (!convo) {
         setStatus('No active conversation — start one first');
         return;
     }
-    console.log('[BurnerPhone] Active convo:', JSON.stringify({ from: convo.from, to: convo.to, msgs: convo.messages?.length }));
+    debug('Active convo:', convo.from.name, '→', convo.to.name, 'msgs:', convo.messages?.length);
 
     const trimmed = text.trim();
 
-    // Save user (from) message
+    // Push user message with pending flag (uncommitted until AI responds)
     convo.messages.push({
         sender: 'from',
         content: trimmed,
         timestamp: Date.now(),
+        pending: true,
     });
 
     // Clear draft
     convo.draftText = '';
     $('#bp_input').val('');
     saveSettingsDebounced();
+    renderConversation();
+    scrollChatToBottom();
 
-    // Capture full context for debugging
-    const contextHandler = (data) => {
-        lastFullContext = data.prompt || data;
-    };
+    const cleaned = await generateResponse(convo, convo.messages, 'Generating...');
 
-    // Wrap everything in try/catch — errors before the old try block were silently dying
-    try {
+    if (cleaned) {
+        // Commit the user message (remove pending flag)
+        const userMsg = convo.messages[convo.messages.length - 1];
+        if (userMsg && userMsg.pending) delete userMsg.pending;
+
+        convo.messages.push({
+            sender: 'to',
+            content: cleaned,
+            timestamp: Date.now(),
+            swipes: [cleaned],
+            swipe_id: 0,
+        });
+        saveSettingsDebounced();
         renderConversation();
         scrollChatToBottom();
-
-        isGenerating = true;
-        setStatus('Generating...', true);
-        setSendEnabled(false);
-
-        const convoContextMode = convo.pmContextMode || 'isolated';
-        const settings = getSettings();
-        let loreContext = '';
-        if (convoContextMode !== 'isolated') {
-            loreContext = await fetchDeepLoreEntries(convo, settings.pmScanDepth);
-        }
-        const prompt = buildPromptFromTemplate(convo, loreContext);
-        lastSentPrompt = prompt;
-        debug('Built prompt, length:', prompt.length);
-
-        eventSource.once(event_types.GENERATE_AFTER_DATA, contextHandler);
-
-        const response = await generateQuietPrompt({
-            quietPrompt: prompt,
-            skipWIAN: convoContextMode === 'isolated',
-            quietName: convo.to.name,
-        });
-
-        debug('Got response, length:', response ? response.length : 'null/empty');
-
-        if (response && response.trim()) {
-            const cleaned = stripNamePrefix(response.trim(), convo.to.name);
-            convo.messages.push({
-                sender: 'to',
-                content: cleaned,
-                timestamp: Date.now(),
-            });
-            saveSettingsDebounced();
+        setStatus('');
+        updateDrawerBadge();
+    } else {
+        // Generation failed or was cancelled — mark user message for retry
+        const userMsg = convo.messages[convo.messages.length - 1];
+        if (userMsg && userMsg.pending) {
             renderConversation();
             scrollChatToBottom();
-            setStatus('');
-        } else {
-            setStatus('Empty response received');
         }
-    } catch (err) {
-        console.error('[BurnerPhone] GENERATION ERROR:', err);
-        console.error('[BurnerPhone] Stack:', err?.stack);
-        setStatus(`Error: ${err?.message || 'Generation failed'}`);
-    } finally {
-        isGenerating = false;
-        setSendEnabled(true);
-        eventSource.removeListener(event_types.GENERATE_AFTER_DATA, contextHandler);
-        debug('Generation complete');
+    }
+}
+
+/**
+ * Retry generation for a conversation that already has the user message in place.
+ * Used by the retry button on pending messages.
+ */
+async function sendPmRetry(convo) {
+    const cleaned = await generateResponse(convo, convo.messages, 'Retrying...');
+    if (cleaned) {
+        convo.messages.push({
+            sender: 'to',
+            content: cleaned,
+            timestamp: Date.now(),
+            swipes: [cleaned],
+            swipe_id: 0,
+        });
+        saveSettingsDebounced();
+        renderConversation();
+        scrollChatToBottom();
+        setStatus('');
+        updateDrawerBadge();
+    } else {
+        renderConversation();
+        scrollChatToBottom();
     }
 }
 
@@ -547,14 +700,17 @@ function onGenerate(chatMessages, contextSize, abort, type) {
 
         // GROUP CHAT TARGETING: only inject when generating for the To character
         if (is_group_generating && selected_group) {
-            const toCard = findCharacterCard(convo.to.name);
-            if (toCard) {
-                const toIndex = characters.indexOf(toCard);
-                if (String(toIndex) !== String(this_chid)) {
-                    // Not this character's turn — clear injection for this key
-                    setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
-                    continue;
-                }
+            const toCard = findCharacterCard(convo.to.avatar || convo.to.name);
+            if (!toCard) {
+                // Character not found (deleted?) — don't inject
+                setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
+                continue;
+            }
+            const toIndex = characters.indexOf(toCard);
+            if (String(toIndex) !== String(this_chid)) {
+                // Not this character's turn — clear injection for this key
+                setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
+                continue;
             }
         }
 
@@ -594,7 +750,19 @@ function renderConversation() {
         return;
     }
 
+    const settings = getSettings();
+    let lastDateStr = '';
+
     convo.messages.forEach((msg, index) => {
+        // Date separator (optional, UI-only)
+        if (settings.showDateSeparators && msg.timestamp) {
+            const dateStr = new Date(msg.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+            if (dateStr !== lastDateStr) {
+                lastDateStr = dateStr;
+                $messages.append($('<div class="bp-date-separator"></div>').text(dateStr));
+            }
+        }
+
         const isFrom = msg.sender === 'from';
         const senderName = isFrom ? convo.from.name : convo.to.name;
         const displayContent = getDisplayContent(msg);
@@ -605,6 +773,7 @@ function renderConversation() {
         // Clone ST's message template
         const $mes = $('#message_template .mes').clone();
         $mes.addClass('bp-mes');
+        if (msg.pending) $mes.addClass('bp-pending');
         $mes.attr('data-bp-idx', index);
         $mes.removeAttr('mesid');
         $mes.attr('is_user', isFrom);
@@ -617,8 +786,8 @@ function renderConversation() {
 
         // Avatar
         const avatarUrl = isFrom
-            ? (convo.from.type === 'user' ? getUserAvatarUrl() : getCharAvatarUrl(convo.from.name))
-            : getCharAvatarUrl(convo.to.name);
+            ? (convo.from.type === 'user' ? getUserAvatarUrl() : getCharAvatarUrl(convo.from))
+            : getCharAvatarUrl(convo.to);
         $mes.find('.avatar img').attr('src', avatarUrl);
 
         // Strip leftover name prefix from old messages on display
@@ -635,10 +804,21 @@ function renderConversation() {
         // Always show prompt button (popup handles empty state)
         $mes.find('.mes_prompt').show();
 
-        // Add regenerate button for last AI message
-        if (!isFrom && index === convo.messages.length - 1) {
+        // Add regenerate button for ALL AI messages (F2)
+        if (!isFrom) {
             $mes.find('.extraMesButtons').append(
                 '<div title="Regenerate" class="mes_button bp-regenerate fa-solid fa-arrows-rotate"></div>',
+            );
+        }
+
+        // Pending message retry UI
+        if (msg.pending && isFrom && index === convo.messages.length - 1) {
+            $mes.find('.mes_block').append(
+                `<div class="bp-retry-bar">
+                    <span>Failed to get response</span>
+                    <div class="menu_button bp-retry" title="Retry">Retry</div>
+                    <div class="menu_button bp-delete-pending" title="Delete">Delete</div>
+                </div>`,
             );
         }
 
@@ -646,7 +826,9 @@ function renderConversation() {
         if (!isFrom && msg.swipes && msg.swipes.length > 1) {
             const swipeId = msg.swipe_id || 0;
             $mes.find('.swipe_left').show().toggleClass('disabled', swipeId === 0);
-            $mes.find('.swipe_right').show().toggleClass('disabled', swipeId === msg.swipes.length - 1);
+            // Don't disable swipe_right on last swipe of last message — allow swipe-to-regen (F4)
+            const isLastMsg = index === convo.messages.length - 1;
+            $mes.find('.swipe_right').show().toggleClass('disabled', !isLastMsg && swipeId === msg.swipes.length - 1);
             $mes.find('.swipes-counter').text(`${swipeId + 1}/${msg.swipes.length}`).show();
         } else {
             $mes.find('.swipe_left, .swipe_right, .swipes-counter').hide();
@@ -674,9 +856,20 @@ function renderConversationList() {
         migrateConversation(convo, key);
         const isActive = key === activeKey;
         const label = `${convo.from.name} → ${convo.to.name}`;
+
+        // Check if characters still exist (ghost detection)
+        const toOrphaned = convo.to.type === 'card' && !findCharacterCard(convo.to.avatar || convo.to.name);
+        const fromOrphaned = convo.from.type === 'card' && !findCharacterCard(convo.from.avatar || convo.from.name);
+        const isOrphaned = toOrphaned || fromOrphaned;
+
         const $item = $('<div class="bp-convo-item"></div>')
             .toggleClass('active', isActive)
+            .toggleClass('bp-orphaned', isOrphaned)
             .attr('data-key', key);
+        if (isOrphaned) {
+            $item.attr('title', 'Character no longer found');
+            $item.append($('<i class="fa-solid fa-triangle-exclamation" style="opacity:0.6;margin-right:4px;font-size:0.8em;"></i>'));
+        }
         $item.append($('<span></span>').text(`${label} (${convo.messages.length})`));
         $item.append($('<span class="bp-convo-delete fa-solid fa-xmark"></span>')
             .attr('data-key', key).attr('title', 'Delete'));
@@ -743,13 +936,17 @@ function handleDelete(convo, index) {
 }
 
 async function handleRegenerate(convo, index) {
-    if (isGenerating) {
-        setStatus('Already generating...');
-        return;
-    }
-
     const msg = convo.messages[index];
     if (msg.sender !== 'to') return;
+
+    // If regenerating a non-last message, warn about truncation
+    if (index < convo.messages.length - 1) {
+        const removeCount = convo.messages.length - 1 - index;
+        if (!confirm(`This will remove ${removeCount} message${removeCount > 1 ? 's' : ''} after this point. Continue?`)) return;
+        convo.messages.splice(index + 1);
+        saveSettingsDebounced();
+        renderConversation();
+    }
 
     // Initialize swipes if not present
     if (!msg.swipes) {
@@ -757,56 +954,19 @@ async function handleRegenerate(convo, index) {
         msg.swipe_id = 0;
     }
 
-    isGenerating = true;
-    setStatus('Regenerating...', true);
-    setSendEnabled(false);
+    // Build prompt from messages up to (not including) the message being regenerated
+    const messagesForPrompt = convo.messages.slice(0, index);
+    const cleaned = await generateResponse(convo, messagesForPrompt, 'Regenerating...');
 
-    // Capture full context
-    const contextHandler = (data) => {
-        lastFullContext = data.prompt || data;
-    };
-    eventSource.once(event_types.GENERATE_AFTER_DATA, contextHandler);
-
-    try {
-        const regenContextMode = convo.pmContextMode || 'isolated';
-        let loreContext = '';
-        if (regenContextMode !== 'isolated') {
-            loreContext = await fetchDeepLoreEntries(convo, getSettings().pmScanDepth);
-        }
-        // Build prompt without the message being regenerated
-        const originalMessages = convo.messages;
-        convo.messages = originalMessages.slice(0, index);
-        const prompt = buildPromptFromTemplate(convo, loreContext);
-        convo.messages = originalMessages;
-
-        lastSentPrompt = prompt;
-
-        const response = await generateQuietPrompt({
-            quietPrompt: prompt,
-            skipWIAN: regenContextMode === 'isolated',
-            quietName: convo.to.name,
-        });
-
-        if (response && response.trim()) {
-            const cleaned = stripNamePrefix(response.trim(), convo.to.name);
-            msg.swipes.push(cleaned);
-            msg.swipe_id = msg.swipes.length - 1;
-            msg.content = cleaned;
-            msg.timestamp = Date.now();
-            saveSettingsDebounced();
-            renderConversation();
-            scrollChatToBottom();
-            setStatus('');
-        } else {
-            setStatus('Empty response received');
-        }
-    } catch (err) {
-        console.error('[BurnerPhone] REGENERATE ERROR:', err);
-        setStatus(`Error: ${err?.message || 'Regeneration failed'}`);
-    } finally {
-        isGenerating = false;
-        setSendEnabled(true);
-        eventSource.removeListener(event_types.GENERATE_AFTER_DATA, contextHandler);
+    if (cleaned) {
+        msg.swipes.push(cleaned);
+        msg.swipe_id = msg.swipes.length - 1;
+        msg.content = cleaned;
+        msg.timestamp = Date.now();
+        saveSettingsDebounced();
+        renderConversation();
+        scrollChatToBottom();
+        setStatus('');
     }
 }
 
@@ -823,9 +983,17 @@ async function handleTts(convo, msg) {
 
 function handleSwipe(convo, index, direction) {
     const msg = convo.messages[index];
-    if (!msg.swipes || msg.swipes.length <= 1) return;
+    if (!msg.swipes || msg.swipes.length === 0) return;
 
-    const newId = (msg.swipe_id || 0) + direction;
+    const currentId = msg.swipe_id || 0;
+    const newId = currentId + direction;
+
+    // Swipe-right past last swipe on last AI message → trigger regeneration (F4)
+    if (direction === 1 && newId >= msg.swipes.length && index === convo.messages.length - 1 && msg.sender === 'to') {
+        handleRegenerate(convo, index);
+        return;
+    }
+
     if (newId < 0 || newId >= msg.swipes.length) return;
 
     msg.swipe_id = newId;
@@ -930,6 +1098,7 @@ function deleteConversation(key) {
 
     saveSettingsDebounced();
     renderConversationList();
+    updateDrawerBadge();
     debug(`Deleted conversation: ${label}`);
 }
 
@@ -958,40 +1127,203 @@ function saveDraftDebounced() {
 // ==========================================================================
 
 function onDrawerOpened() {
-    populateDatalists();
+    autoPopulateTo();
     renderConversationList();
     const activeKey = getActiveKey();
     if (activeKey) switchToConversation(activeKey);
 }
 
 // ==========================================================================
-// Datalist population (combined dropdown + text input)
+// Character Picker (dropdown with avatars)
 // ==========================================================================
 
-function populateDatalists() {
-    const names = [];
-    if (characters && characters.length) {
-        for (const char of characters) {
-            if (char && char.name) names.push(char.name);
+function buildPickerItems(isFromField, filterText) {
+    const items = [];
+    const filter = (filterText || '').toLowerCase().trim();
+
+    // For "From" field: add persona / "Me" option first
+    if (isFromField) {
+        const personaName = name1 || 'User';
+        if (!filter || `me ${personaName}`.toLowerCase().includes(filter)) {
+            items.push({
+                label: `Me (${personaName})`,
+                avatarUrl: getUserAvatarUrl(),
+                section: 'Persona',
+            });
         }
     }
 
-    for (const id of ['bp_from_list', 'bp_to_list']) {
-        const $dl = $(`#${id}`);
-        $dl.empty();
-        // "Me" option for From
-        if (id === 'bp_from_list') {
-            $dl.append($('<option>').attr('value', `Me (${name1 || 'User'})`));
-        }
-        for (const n of names) {
-            $dl.append($('<option>').attr('value', n));
+    // Characters
+    if (characters && characters.length) {
+        for (const char of characters) {
+            if (!char || !char.name) continue;
+            if (filter && !char.name.toLowerCase().includes(filter)) continue;
+            items.push({
+                label: char.name,
+                avatarUrl: char.avatar ? `/characters/${char.avatar}` : default_avatar,
+                section: 'Characters',
+            });
         }
     }
+
+    return items;
+}
+
+function renderPickerDropdown($dropdown, items) {
+    $dropdown.empty();
+    if (items.length === 0) {
+        $dropdown.hide();
+        return;
+    }
+
+    let currentSection = '';
+    for (const item of items) {
+        if (item.section !== currentSection) {
+            currentSection = item.section;
+            $dropdown.append($(`<div class="bp-picker-section-label"></div>`).text(currentSection));
+        }
+        const $item = $(`<div class="bp-picker-item"></div>`)
+            .attr('data-value', item.label);
+        $item.append($(`<img class="bp-picker-avatar">`).attr('src', item.avatarUrl));
+        $item.append($(`<span class="bp-picker-name"></span>`).text(item.label));
+        $dropdown.append($item);
+    }
+    $dropdown.show();
+}
+
+function setupPickerField(inputId, dropdownId, isFromField) {
+    const $input = $(`#${inputId}`);
+    const $dropdown = $(`#${dropdownId}`);
+
+    // Show dropdown on focus
+    $input.on('focus', () => {
+        const items = buildPickerItems(isFromField, $input.val());
+        renderPickerDropdown($dropdown, items);
+    });
+
+    // Filter on input
+    $input.on('input', () => {
+        const items = buildPickerItems(isFromField, $input.val());
+        renderPickerDropdown($dropdown, items);
+    });
+
+    // Click item to select
+    $dropdown.on('mousedown', '.bp-picker-item', function (e) {
+        e.preventDefault(); // Prevent blur
+        const value = $(this).attr('data-value');
+        $input.val(value);
+        $dropdown.hide();
+    });
+
+    // Hide on blur (with delay for click registration)
+    $input.on('blur', () => {
+        setTimeout(() => $dropdown.hide(), 150);
+    });
+}
+
+function initPickers() {
+    setupPickerField('bp_from', 'bp_from_dropdown', true);
+    setupPickerField('bp_to', 'bp_to_dropdown', false);
 
     // Set default From value if empty
     const $from = $('#bp_from');
     if (!$from.val()) {
         $from.val(`Me (${name1 || 'User'})`);
+    }
+
+    // Auto-populate To with active character if no active conversation
+    autoPopulateTo();
+}
+
+function autoPopulateTo() {
+    const $to = $('#bp_to');
+    if ($to.val()) return; // Don't overwrite existing value
+    if (getActiveKey()) return; // Active conversation exists
+
+    // Use currently active character
+    if (this_chid !== undefined && characters && characters[this_chid]) {
+        $to.val(characters[this_chid].name);
+    }
+}
+
+// ==========================================================================
+// Export / Import
+// ==========================================================================
+
+function exportConversation() {
+    const convo = getActiveConversation();
+    if (!convo) {
+        setStatus('No active conversation to export');
+        return;
+    }
+
+    const data = {
+        version: 1,
+        from: { ...convo.from },
+        to: { ...convo.to },
+        messages: convo.messages.map(m => ({ ...m })),
+        pmContextMode: convo.pmContextMode,
+        storySeesPm: convo.storySeesPm,
+        exportedAt: new Date().toISOString(),
+    };
+
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const datePart = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `bp-${convo.from.name}-${convo.to.name}-${datePart}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus('Exported conversation');
+}
+
+function importConversation(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const data = JSON.parse(e.target.result);
+            if (!data.from || !data.to || !Array.isArray(data.messages)) {
+                setStatus('Invalid BurnerPhone export file');
+                return;
+            }
+
+            const from = data.from;
+            const to = data.to;
+            const { key, conversation } = getOrCreateConversation(from, to);
+
+            // Append imported messages (don't overwrite existing)
+            if (conversation.messages.length > 0) {
+                if (!confirm(`Conversation ${from.name} → ${to.name} already has ${conversation.messages.length} messages. Append ${data.messages.length} imported messages?`)) return;
+            }
+            conversation.messages.push(...data.messages);
+            if (data.pmContextMode) conversation.pmContextMode = data.pmContextMode;
+            if (data.storySeesPm !== undefined) conversation.storySeesPm = data.storySeesPm;
+
+            saveSettingsDebounced();
+            switchToConversation(key);
+            setStatus(`Imported ${data.messages.length} messages`);
+        } catch (err) {
+            console.error('[BurnerPhone] Import error:', err);
+            setStatus('Failed to import — invalid JSON');
+        }
+    };
+    reader.readAsText(file);
+}
+
+// ==========================================================================
+// Drawer Badge
+// ==========================================================================
+
+function updateDrawerBadge() {
+    const conversations = getConversations();
+    const totalMessages = Object.values(conversations).reduce((sum, c) => sum + (c.messages?.length || 0), 0);
+    const $icon = $('#burnerphoneIcon');
+    $icon.find('.bp-badge').remove();
+    if (totalMessages > 0) {
+        $icon.append($(`<span class="bp-badge"></span>`).text(totalMessages));
     }
 }
 
@@ -1011,6 +1343,7 @@ function loadSettingsUI() {
     $('#bp_injection_role').val(settings.injectionRole);
     $('#bp_injection_max_messages').val(settings.injectionMaxMessages);
     $('#bp_prompt_template').val(settings.promptTemplate || DEFAULT_PROMPT_TEMPLATE);
+    $('#bp_show_date_separators').prop('checked', settings.showDateSeparators);
     $('#bp_debug_mode').prop('checked', settings.debugMode);
 
     // Colors
@@ -1039,6 +1372,7 @@ function bindSettingsEvents() {
     bind('#bp_injection_role', 'injectionRole', $el => parseInt($el.val()));
     bind('#bp_injection_max_messages', 'injectionMaxMessages', $el => parseInt($el.val()) || 20);
     bind('#bp_prompt_template', 'promptTemplate', $el => $el.val());
+    bind('#bp_show_date_separators', 'showDateSeparators', $el => $el.prop('checked'));
     bind('#bp_debug_mode', 'debugMode', $el => $el.prop('checked'));
 
     // Bubble colors
@@ -1075,7 +1409,7 @@ function bindSettingsEvents() {
 function bindChatPanelEvents() {
     // Start conversation from From/To inputs — delegated
     $(document).off('click.bp_start', '#bp_start_convo').on('click.bp_start', '#bp_start_convo', function () {
-        console.log('[BurnerPhone] Start conversation clicked');
+        debug('Start conversation clicked');
         const fromVal = $('#bp_from').val();
         const toVal = $('#bp_to').val();
         const from = parseIdentityInput(fromVal);
@@ -1102,14 +1436,14 @@ function bindChatPanelEvents() {
 
     // Send message (use delegation on the drawer panel for reliability)
     $(document).off('click.bp_send', '#bp_send').on('click.bp_send', '#bp_send', function () {
-        console.log('[BurnerPhone] Send button clicked');
+        debug('Send button clicked');
         sendPmMessage($('#bp_input').val());
     });
 
     // Enter to send (shift+enter for newline) — delegated
     $(document).off('keydown.bp_input', '#bp_input').on('keydown.bp_input', '#bp_input', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) {
-            console.log('[BurnerPhone] Enter pressed in input');
+            debug('Enter pressed in input');
             e.preventDefault();
             sendPmMessage($(this).val());
         }
@@ -1149,7 +1483,27 @@ function bindChatPanelEvents() {
         convo.messages = [];
         saveSettingsDebounced();
         renderConversation();
+        updateDrawerBadge();
         setStatus('Conversation cleared');
+    });
+
+    // Cancel generation
+    $(document).off('click.bp_cancel', '#bp_cancel').on('click.bp_cancel', '#bp_cancel', function () {
+        cancelGeneration();
+    });
+
+    // Export conversation
+    $(document).off('click.bp_export', '#bpExport').on('click.bp_export', '#bpExport', function () {
+        exportConversation();
+    });
+
+    // Import conversation
+    $(document).off('click.bp_import', '#bpImport').on('click.bp_import', '#bpImport', function () {
+        $('#bpImportFile').trigger('click');
+    });
+    $(document).off('change.bp_import_file', '#bpImportFile').on('change.bp_import_file', '#bpImportFile', function () {
+        importConversation(this.files[0]);
+        $(this).val(''); // Reset so same file can be re-imported
     });
 
     // Prompt viewer — open ST Popup
@@ -1257,6 +1611,32 @@ function bindChatPanelEvents() {
         if (convo && !isNaN(idx)) handleSwipe(convo, idx, 1);
     });
 
+    // Retry pending message
+    $panel.on('click', '.bp-retry', function (e) {
+        e.stopPropagation();
+        const convo = getActiveConversation();
+        if (!convo) return;
+        const lastMsg = convo.messages[convo.messages.length - 1];
+        if (lastMsg && lastMsg.pending) {
+            // Re-trigger generation with the pending message still in place
+            delete lastMsg.pending;
+            sendPmRetry(convo);
+        }
+    });
+
+    // Delete pending message
+    $panel.on('click', '.bp-delete-pending', function (e) {
+        e.stopPropagation();
+        const convo = getActiveConversation();
+        if (!convo) return;
+        const lastMsg = convo.messages[convo.messages.length - 1];
+        if (lastMsg && lastMsg.pending) {
+            convo.messages.pop();
+            saveSettingsDebounced();
+            renderConversation();
+        }
+    });
+
     // Extra buttons toggle (ST's ellipsis expand)
     $panel.on('click', '.bp-mes .extraMesButtonsHint', function (e) {
         e.stopPropagation();
@@ -1313,6 +1693,9 @@ jQuery(async function () {
         extension_settings[MODULE_NAME],
     );
 
+    // Migrate old '::' conversation keys to '\x1F' separator
+    migrateConversationKeys();
+
     // Render settings panel into extensions settings area
     const settingsHtml = await renderExtensionTemplateAsync(EXTENSION_PATH, 'settings');
     $('#extensions_settings2').append(settingsHtml);
@@ -1341,13 +1724,13 @@ jQuery(async function () {
     bindChatPanelEvents();
     applyBubbleColors();
 
-    // Populate datalists when characters change
-    eventSource.on(event_types.CHAT_CHANGED, () => {
-        populateDatalists();
-    });
+    // Initialize character pickers
+    initPickers();
 
-    // Initial population
-    populateDatalists();
+    // Refresh pickers and auto-populate on chat change
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        autoPopulateTo();
+    });
 
     // Restore active conversation if any
     const activeKey = getActiveKey();
@@ -1355,5 +1738,8 @@ jQuery(async function () {
         switchToConversation(activeKey);
     }
 
-    console.log('[BurnerPhone] Extension loaded (v0.5.0)');
+    // Initial badge
+    updateDrawerBadge();
+
+    console.log('[BurnerPhone] Extension loaded (v0.6.0)');
 });
