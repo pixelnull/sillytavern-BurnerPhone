@@ -600,6 +600,10 @@ function showCancelButton(show) {
 
 async function sendPmMessage(text) {
     debug('sendPmMessage called, text:', text ? text.substring(0, 50) : '(empty)');
+    if (isGenerating) {
+        setStatus('Already generating...');
+        return;
+    }
     if (!getSettings().enabled) {
         setStatus('BurnerPhone is disabled');
         return;
@@ -651,7 +655,7 @@ async function sendPmMessage(text) {
         renderConversation();
         scrollChatToBottom();
         setStatus('');
-        updateDrawerBadge();
+        markActiveConversationRead();
     } else {
         // Generation failed or was cancelled — mark user message for retry
         const userMsg = convo.messages[convo.messages.length - 1];
@@ -669,6 +673,10 @@ async function sendPmMessage(text) {
 async function sendPmRetry(convo) {
     const cleaned = await generateResponse(convo, convo.messages, 'Retrying...');
     if (cleaned) {
+        // Commit the pending user message
+        const lastMsg = convo.messages[convo.messages.length - 1];
+        if (lastMsg && lastMsg.pending) delete lastMsg.pending;
+
         convo.messages.push({
             sender: 'to',
             content: cleaned,
@@ -680,8 +688,9 @@ async function sendPmRetry(convo) {
         renderConversation();
         scrollChatToBottom();
         setStatus('');
-        updateDrawerBadge();
+        markActiveConversationRead();
     } else {
+        // Keep pending flag so retry bar remains visible
         renderConversation();
         scrollChatToBottom();
     }
@@ -701,7 +710,9 @@ function formatPmForInjection(conversation, maxMessages) {
     const toName = conversation.to.name;
     const lines = recent.map(msg => {
         const sender = msg.sender === 'from' ? fromName : toName;
-        return `${sender}: ${msg.content}`;
+        // Escape closing tags to prevent XML breakout in prompt
+        const safeContent = msg.content.replace(/<\//g, '&lt;/');
+        return `${sender}: ${safeContent}`;
     });
 
     const safeFrom = fromName.replace(/"/g, '&quot;');
@@ -969,6 +980,7 @@ function handleDelete(convo, index) {
     convo.messages.splice(index, 1);
     saveSettingsDebounced();
     renderConversation();
+    updateDrawerBadge();
 }
 
 async function handleRegenerate(convo, index) {
@@ -1519,6 +1531,7 @@ function bindChatPanelEvents() {
         if (!convo) return;
         if (!confirm(`Clear all messages in this conversation?`)) return;
         convo.messages = [];
+        convo.lastReadCount = 0;
         saveSettingsDebounced();
         renderConversation();
         updateDrawerBadge();
@@ -1656,8 +1669,7 @@ function bindChatPanelEvents() {
         if (!convo) return;
         const lastMsg = convo.messages[convo.messages.length - 1];
         if (lastMsg && lastMsg.pending) {
-            // Re-trigger generation with the pending message still in place
-            delete lastMsg.pending;
+            // sendPmRetry handles pending flag: deletes on success, keeps on failure
             sendPmRetry(convo);
         }
     });
