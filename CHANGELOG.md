@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.7.0
+
+### Context Mode Rework
+- **4-mode system** — replaces old 3-mode `pmContextMode` + separate `storySeesPm` toggle:
+  - **Isolated**: Character cards + character-name-only lore scan. No PM-triggered lore, no main chat context.
+  - **Lore Only**: Character cards + lore triggered by PM messages + character names. No main chat context.
+  - **Lore + Context** (new): Character cards + main chat messages in prompt + lore triggered by PM + main chat + character names.
+  - **Full**: Same as Lore + Context, plus PMs injected into main story generation (bidirectional).
+- **`storySeesPm` removed** — functionality folded into Full mode. Migration auto-converts existing conversations.
+- **Character-name lore in all modes** — character names are always included in DeepLore/WI scan text, ensuring characters without cards but with lorebook entries get their info in every mode.
+- **`skipWIAN: false` for all modes** — ST's built-in World Info always scans the prompt, finding character entries even in isolated mode.
+
+### Unread Badge Tracking
+- **Per-conversation unread count** — badge shows total unread messages across all conversations, not total messages.
+- **`lastReadCount` tracking** — each conversation tracks how many messages have been read.
+- **Mark as read** — conversations marked read when opened or switched to; badge clears accordingly.
+- **Per-tab unread labels** — conversation list shows "(N new)" for conversations with unread messages.
+
+### Bug Fixes
+- **Picker dropdown opacity** — character picker dropdown now uses `--SmartThemeBGColor` (opaque) instead of `--SmartThemeBlurTintColor` (semi-transparent).
+
+### Migration
+- Existing conversations with `storySeesPm: true` → mode set to `full`.
+- Old `full` mode without `storySeesPm` → mapped to `lore-context`.
+- Existing conversations get `lastReadCount = messages.length` to avoid spurious badge on upgrade.
+
 ## v0.6.0
 
 ### Bug Fixes

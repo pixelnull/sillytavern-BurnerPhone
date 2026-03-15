@@ -19,16 +19,11 @@
             <div class="flex-container flexFlowColumn">
                 <label for="bp_default_pm_context_mode">PM context awareness</label>
                 <select id="bp_default_pm_context_mode" class="text_pole wide100p">
-                    <option value="isolated">Isolated (no lore, no chat)</option>
-                    <option value="lore">Lore only (world info, no chat)</option>
-                    <option value="full">Full (lore + main chat)</option>
+                    <option value="isolated">Isolated (character cards only)</option>
+                    <option value="lore">Lore Only (PM triggers lorebook)</option>
+                    <option value="lore-context">Lore + Context (PM + main chat trigger lorebook)</option>
+                    <option value="full">Full (bidirectional — story sees PM)</option>
                 </select>
-            </div>
-            <div class="flex-container">
-                <label class="checkbox_label" for="bp_default_story_sees_pm">
-                    <input id="bp_default_story_sees_pm" type="checkbox">
-                    <span>Story sees PM (inject PM into main generation)</span>
-                </label>
             </div>
 
             <hr>

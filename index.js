@@ -46,11 +46,11 @@ Example — if {{from}} says "hey where are you?", respond like:
 
 const ISOLATION_FRAMING = `[This is an isolated private conversation. {{to}} has no knowledge of any ongoing story, roleplay, or events outside this PM exchange.]`;
 const LORE_ONLY_FRAMING = `[This PM conversation is separate from the main story. {{to}} has general world knowledge and lore but is not aware of current story events or the main chat.]`;
+const LORE_CONTEXT_FRAMING = `[This PM conversation takes place alongside the main story. {{to}} has world knowledge and is aware of the ongoing story context.]`;
 
 const defaultSettings = {
     enabled: true,
     pmContextMode: 'isolated',
-    storySeesPm: false,
     pmScanDepth: 10,
     mainChatScanDepth: 10,
     injectionPosition: extension_prompt_types.IN_CHAT,
@@ -274,7 +274,7 @@ function getOrCreateConversation(from, to) {
             to: { ...to },
             messages: [],
             pmContextMode: settings.pmContextMode,
-            storySeesPm: settings.storySeesPm,
+            lastReadCount: 0,
             draftText: '',
         };
         saveSettingsDebounced();
@@ -366,19 +366,40 @@ function getMainChatContext(depth) {
 // Prompt building
 // ==========================================================================
 
-async function fetchDeepLoreEntries(conversation, scanDepth) {
+async function fetchDeepLoreEntries(conversation, scanDepth, mainChatText = '', namesOnly = false) {
     if (!globalThis.deepLoreEnhanced_matchText) return '';
+
+    // Character names are ALWAYS included in scan text (baseline for all modes)
+    const namePreamble = `${conversation.from.name} ${conversation.to.name}`;
+
+    if (namesOnly) {
+        // Isolated mode: scan only character names
+        try {
+            const result = await globalThis.deepLoreEnhanced_matchText(namePreamble);
+            if (result.text) {
+                debug(`DeepLore matched ${result.count} entries (~${result.tokens} tokens) [names-only]`);
+                return result.text;
+            }
+        } catch (err) {
+            console.error('[BurnerPhone] DeepLore matchText error:', err);
+            toastr.warning('Lore context unavailable — DeepLore error', 'BurnerPhone', { timeOut: 4000 });
+        }
+        return '';
+    }
+
     const recent = scanDepth > 0 ? conversation.messages.slice(-scanDepth) : [];
     if (recent.length === 0) return '';
 
-    // Prepend character names so DeepLore matches entries keyed to them
-    // even if names aren't explicitly mentioned in recent messages
-    const namePreamble = `${conversation.from.name} ${conversation.to.name}`;
     const messageLines = recent.map(msg => {
         const sender = msg.sender === 'from' ? conversation.from.name : conversation.to.name;
         return `${sender}: ${msg.content}`;
     }).join('\n');
-    const scanText = `${namePreamble}\n${messageLines}`;
+
+    // Build scan text: character names + PM messages + optional main chat
+    let scanText = `${namePreamble}\n${messageLines}`;
+    if (mainChatText) {
+        scanText += `\n${mainChatText}`;
+    }
 
     try {
         const result = await globalThis.deepLoreEnhanced_matchText(scanText);
@@ -403,10 +424,10 @@ function buildPromptFromTemplate(conversation, loreContext = '') {
     const fromContext = resolveCharacterContext(conversation.from);
     const toContext = resolveCharacterContext(conversation.to);
 
-    // Story context (only in full mode)
+    // Story context (lore-context and full modes)
     let storyContext = '';
     const contextMode = conversation.pmContextMode || 'isolated';
-    if (contextMode === 'full') {
+    if (contextMode === 'lore-context' || contextMode === 'full') {
         const mainChat = getMainChatContext(settings.mainChatScanDepth);
         if (mainChat) {
             storyContext = `[Recent Story Context — the main roleplay/story these characters are part of]\n${mainChat}`;
@@ -444,6 +465,9 @@ function buildPromptFromTemplate(conversation, loreContext = '') {
         prompt = framing + '\n\n' + prompt;
     } else if (contextMode === 'lore') {
         const framing = LORE_ONLY_FRAMING.replace(/\{\{to\}\}/g, () => toName);
+        prompt = framing + '\n\n' + prompt;
+    } else if (contextMode === 'lore-context' || contextMode === 'full') {
+        const framing = LORE_CONTEXT_FRAMING.replace(/\{\{to\}\}/g, () => toName);
         prompt = framing + '\n\n' + prompt;
     }
 
@@ -493,9 +517,19 @@ async function generateResponse(convo, messagesForPrompt, statusLabel = 'Generat
     try {
         const contextMode = convo.pmContextMode || 'isolated';
         const settings = getSettings();
+
+        // Fetch lore context — all modes scan for character names at minimum
         let loreContext = '';
-        if (contextMode !== 'isolated') {
+        if (contextMode === 'isolated') {
+            // Names-only scan: find lorebook entries keyed to character names
+            loreContext = await fetchDeepLoreEntries(convo, settings.pmScanDepth, '', true);
+        } else if (contextMode === 'lore') {
+            // PM messages + character names
             loreContext = await fetchDeepLoreEntries(convo, settings.pmScanDepth);
+        } else {
+            // lore-context / full: PM messages + main chat + character names
+            const mainChatText = getMainChatContext(settings.mainChatScanDepth);
+            loreContext = await fetchDeepLoreEntries(convo, settings.pmScanDepth, mainChatText);
         }
 
         // Build prompt using a temporary convo with the specified messages (no mutation)
@@ -511,7 +545,7 @@ async function generateResponse(convo, messagesForPrompt, statusLabel = 'Generat
 
         const response = await generateQuietPrompt({
             quietPrompt: prompt,
-            skipWIAN: contextMode === 'isolated',
+            skipWIAN: false,
             quietName: convo.to.name,
         });
 
@@ -692,8 +726,8 @@ function onGenerate(chatMessages, contextSize, abort, type) {
             continue;
         }
 
-        if (!convo.storySeesPm || !convo.messages.length) {
-            // Clear any stale injection
+        if (convo.pmContextMode !== 'full' || !convo.messages.length) {
+            // Clear any stale injection — only 'full' mode injects PMs into story
             setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
             continue;
         }
@@ -870,7 +904,9 @@ function renderConversationList() {
             $item.attr('title', 'Character no longer found');
             $item.append($('<i class="fa-solid fa-triangle-exclamation" style="opacity:0.6;margin-right:4px;font-size:0.8em;"></i>'));
         }
-        $item.append($('<span></span>').text(`${label} (${convo.messages.length})`));
+        const unread = Math.max(0, (convo.messages?.length || 0) - (convo.lastReadCount || 0));
+        const countLabel = unread > 0 ? `${label} (${unread} new)` : `${label} (${convo.messages.length})`;
+        $item.append($('<span></span>').text(countLabel));
         $item.append($('<span class="bp-convo-delete fa-solid fa-xmark"></span>')
             .attr('data-key', key).attr('title', 'Delete'));
         $target.append($item);
@@ -1059,7 +1095,9 @@ function switchToConversation(key) {
 
     // Per-conversation toggles
     $('#bp_toggle_context_mode').val(convo.pmContextMode || 'isolated');
-    $('#bp_toggle_story_sees').prop('checked', convo.storySeesPm);
+
+    // Mark as read
+    markActiveConversationRead();
 
     // Restore draft
     $('#bp_input').val(convo.draftText || '');
@@ -1131,6 +1169,7 @@ function onDrawerOpened() {
     renderConversationList();
     const activeKey = getActiveKey();
     if (activeKey) switchToConversation(activeKey);
+    markActiveConversationRead();
 }
 
 // ==========================================================================
@@ -1263,7 +1302,6 @@ function exportConversation() {
         to: { ...convo.to },
         messages: convo.messages.map(m => ({ ...m })),
         pmContextMode: convo.pmContextMode,
-        storySeesPm: convo.storySeesPm,
         exportedAt: new Date().toISOString(),
     };
 
@@ -1300,7 +1338,6 @@ function importConversation(file) {
             }
             conversation.messages.push(...data.messages);
             if (data.pmContextMode) conversation.pmContextMode = data.pmContextMode;
-            if (data.storySeesPm !== undefined) conversation.storySeesPm = data.storySeesPm;
 
             saveSettingsDebounced();
             switchToConversation(key);
@@ -1319,12 +1356,23 @@ function importConversation(file) {
 
 function updateDrawerBadge() {
     const conversations = getConversations();
-    const totalMessages = Object.values(conversations).reduce((sum, c) => sum + (c.messages?.length || 0), 0);
+    const totalUnread = Object.values(conversations).reduce((sum, c) => {
+        const unread = (c.messages?.length || 0) - (c.lastReadCount || 0);
+        return sum + Math.max(0, unread);
+    }, 0);
     const $icon = $('#burnerphoneIcon');
     $icon.find('.bp-badge').remove();
-    if (totalMessages > 0) {
-        $icon.append($(`<span class="bp-badge"></span>`).text(totalMessages));
+    if (totalUnread > 0) {
+        $icon.append($(`<span class="bp-badge"></span>`).text(totalUnread));
     }
+}
+
+function markActiveConversationRead() {
+    const convo = getActiveConversation();
+    if (!convo) return;
+    convo.lastReadCount = convo.messages.length;
+    saveSettingsDebounced();
+    updateDrawerBadge();
 }
 
 // ==========================================================================
@@ -1335,7 +1383,6 @@ function loadSettingsUI() {
     const settings = getSettings();
     $('#bp_enabled').prop('checked', settings.enabled);
     $('#bp_default_pm_context_mode').val(settings.pmContextMode);
-    $('#bp_default_story_sees_pm').prop('checked', settings.storySeesPm);
     $('#bp_pm_scan_depth').val(settings.pmScanDepth);
     $('#bp_main_chat_scan_depth').val(settings.mainChatScanDepth);
     $('#bp_injection_position').val(settings.injectionPosition);
@@ -1364,7 +1411,6 @@ function bindSettingsEvents() {
 
     bind('#bp_enabled', 'enabled', $el => $el.prop('checked'));
     bind('#bp_default_pm_context_mode', 'pmContextMode', $el => $el.val());
-    bind('#bp_default_story_sees_pm', 'storySeesPm', $el => $el.prop('checked'));
     bind('#bp_pm_scan_depth', 'pmScanDepth', $el => parseInt($el.val()) || 10);
     bind('#bp_main_chat_scan_depth', 'mainChatScanDepth', $el => parseInt($el.val()) || 10);
     bind('#bp_injection_position', 'injectionPosition', $el => parseInt($el.val()));
@@ -1459,16 +1505,8 @@ function bindChatPanelEvents() {
             convo.pmContextMode = $(this).val();
             saveSettingsDebounced();
             debug(`pmContextMode = ${convo.pmContextMode}`);
-        }
-    });
-
-    $(document).off('change.bp_story', '#bp_toggle_story_sees').on('change.bp_story', '#bp_toggle_story_sees', function () {
-        const convo = getActiveConversation();
-        if (convo) {
-            convo.storySeesPm = $(this).prop('checked');
-            saveSettingsDebounced();
-            debug(`storySeesPm = ${convo.storySeesPm}`);
-            if (!convo.storySeesPm) {
+            // Clear story injection if no longer in full mode
+            if (convo.pmContextMode !== 'full') {
                 const key = getActiveKey();
                 setExtensionPrompt(`burner_pm_${key}`, '', extension_prompt_types.IN_PROMPT, 0);
             }
@@ -1696,6 +1734,40 @@ jQuery(async function () {
     // Migrate old '::' conversation keys to '\x1F' separator
     migrateConversationKeys();
 
+    // v0.7.0 migration: storySeesPm → full mode, add lastReadCount
+    {
+        const conversations = getConversations();
+        let migrated = false;
+        for (const convo of Object.values(conversations)) {
+            // Migrate storySeesPm into pmContextMode
+            if (convo.storySeesPm !== undefined) {
+                if (convo.storySeesPm) {
+                    // storySeesPm was on → upgrade to full
+                    convo.pmContextMode = 'full';
+                } else if (convo.pmContextMode === 'full') {
+                    // Old 'full' without storySeesPm → map to lore-context
+                    convo.pmContextMode = 'lore-context';
+                }
+                delete convo.storySeesPm;
+                migrated = true;
+            }
+            // Init lastReadCount for existing conversations (no spurious badge)
+            if (convo.lastReadCount === undefined) {
+                convo.lastReadCount = convo.messages?.length || 0;
+                migrated = true;
+            }
+        }
+        // Also clean storySeesPm from global settings
+        if (extension_settings[MODULE_NAME].storySeesPm !== undefined) {
+            delete extension_settings[MODULE_NAME].storySeesPm;
+            migrated = true;
+        }
+        if (migrated) {
+            saveSettingsDebounced();
+            debug('v0.7.0 migration: storySeesPm → pmContextMode, added lastReadCount');
+        }
+    }
+
     // Render settings panel into extensions settings area
     const settingsHtml = await renderExtensionTemplateAsync(EXTENSION_PATH, 'settings');
     $('#extensions_settings2').append(settingsHtml);
@@ -1741,5 +1813,5 @@ jQuery(async function () {
     // Initial badge
     updateDrawerBadge();
 
-    console.log('[BurnerPhone] Extension loaded (v0.6.0)');
+    console.log('[BurnerPhone] Extension loaded (v0.7.0)');
 });

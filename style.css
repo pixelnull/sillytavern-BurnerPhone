@@ -97,7 +97,7 @@
     right: 0;
     max-height: 250px;
     overflow-y: auto;
-    background: var(--SmartThemeBlurTintColor, #1a1a2e);
+    background: var(--SmartThemeBGColor, #1a1a2e);
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 6px;
     z-index: 1000;
